@@ -5,5 +5,7 @@
   "display": "standalone",
   "background_color": "#1a1917",
   "theme_color": "#1a1917",
-  "description": "Free Whiteboard app — part of FreeAppStore"
+  "description": "Free Whiteboard app \u2014 part of FreeAppStore",
+  "orientation": "any",
+  "min_viewport_width": 360
 }
