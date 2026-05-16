@@ -2,10 +2,21 @@
   "name": "freewhiteboardapp",
   "private": true,
   "packageManager": "pnpm@10.30.3",
-  "engines": { "node": ">=22" },
-  "pnpm": { "onlyBuiltDependencies": ["esbuild"] },
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
   "scripts": {
     "dev": "pnpm --filter @freewhiteboardapp/web dev",
-    "build": "pnpm --filter @freewhiteboardapp/web build"
+    "build": "pnpm --filter @freewhiteboardapp/web build",
+    "test": "pnpm --filter @whiteboard/web exec tsc -b"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/freeappstore-online/whiteboard.git"
   }
 }
