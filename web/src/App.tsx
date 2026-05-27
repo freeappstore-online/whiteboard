@@ -19,6 +19,28 @@ const PRESET_COLORS = [
 ];
 
 const MAX_HISTORY = 20;
+const STORAGE_KEY = "whiteboard_drawings";
+
+interface Drawing {
+  id: string;
+  name: string;
+  dataUrl: string;
+  updatedAt: number;
+}
+
+function loadDrawings(): Drawing[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+function saveDrawings(drawings: Drawing[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(drawings));
+}
 
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -31,6 +53,12 @@ export function App() {
   const [eraser, setEraser] = useState(false);
   const [undoStack, setUndoStack] = useState<ImageData[]>([]);
   const [redoStack, setRedoStack] = useState<ImageData[]>([]);
+
+  const [drawings, setDrawings] = useState<Drawing[]>(loadDrawings);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [showDrawings, setShowDrawings] = useState(false);
 
   const getCssVar = useCallback((name: string) => {
     return getComputedStyle(document.documentElement)
@@ -45,6 +73,19 @@ export function App() {
     },
     [getCssVar],
   );
+
+  const persistCurrentDrawing = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !activeId) return;
+    const dataUrl = canvas.toDataURL("image/png");
+    setDrawings((prev) => {
+      const next = prev.map((d) =>
+        d.id === activeId ? { ...d, dataUrl, updatedAt: Date.now() } : d,
+      );
+      saveDrawings(next);
+      return next;
+    });
+  }, [activeId]);
 
   const saveState = useCallback(() => {
     const canvas = canvasRef.current;
@@ -69,7 +110,6 @@ export function App() {
       if (prev.length === 0) return prev;
       const next = [...prev];
       const last = next.pop()!;
-      // Save current state to redo stack
       const current = ctx.getImageData(0, 0, canvas.width, canvas.height);
       setRedoStack((r) => {
         const rNext = [...r, current];
@@ -90,7 +130,6 @@ export function App() {
       if (prev.length === 0) return prev;
       const next = [...prev];
       const last = next.pop()!;
-      // Save current state to undo stack
       const current = ctx.getImageData(0, 0, canvas.width, canvas.height);
       setUndoStack((u) => {
         const uNext = [...u, current];
@@ -114,13 +153,109 @@ export function App() {
   const handleDownload = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const drawing = drawings.find((d) => d.id === activeId);
     const link = document.createElement("a");
-    link.download = "whiteboard.png";
+    link.download = (drawing?.name || "whiteboard") + ".png";
     link.href = canvas.toDataURL("image/png");
     link.click();
-  }, []);
+  }, [activeId, drawings]);
 
-  // Resize canvas to match container
+  const loadDrawingToCanvas = useCallback(
+    (dataUrl: string) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const img = new Image();
+      img.onload = () => {
+        fillCanvas(ctx, canvas.width, canvas.height);
+        const dpr = window.devicePixelRatio || 1;
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(img, 0, 0, Math.min(img.width, canvas.width), Math.min(img.height, canvas.height));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.restore();
+      };
+      img.src = dataUrl;
+    },
+    [fillCanvas],
+  );
+
+  const handleNewDrawing = useCallback(() => {
+    if (activeId) persistCurrentDrawing();
+    const id = crypto.randomUUID();
+    const drawing: Drawing = {
+      id,
+      name: `Drawing ${drawings.length + 1}`,
+      dataUrl: "",
+      updatedAt: Date.now(),
+    };
+    const next = [drawing, ...drawings];
+    setDrawings(next);
+    saveDrawings(next);
+    setActiveId(id);
+    setUndoStack([]);
+    setRedoStack([]);
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) fillCanvas(ctx, canvas.width, canvas.height);
+    }
+  }, [activeId, persistCurrentDrawing, drawings, fillCanvas]);
+
+  const handleSwitchDrawing = useCallback(
+    (id: string) => {
+      if (id === activeId) return;
+      if (activeId) persistCurrentDrawing();
+      setActiveId(id);
+      setUndoStack([]);
+      setRedoStack([]);
+      const drawing = drawings.find((d) => d.id === id);
+      if (drawing?.dataUrl) {
+        loadDrawingToCanvas(drawing.dataUrl);
+      } else {
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const ctx = canvas.getContext("2d");
+          if (ctx) fillCanvas(ctx, canvas.width, canvas.height);
+        }
+      }
+    },
+    [activeId, persistCurrentDrawing, drawings, loadDrawingToCanvas, fillCanvas],
+  );
+
+  const handleDeleteDrawing = useCallback(
+    (id: string) => {
+      const next = drawings.filter((d) => d.id !== id);
+      setDrawings(next);
+      saveDrawings(next);
+      if (activeId === id) {
+        if (next.length > 0 && next[0]) {
+          handleSwitchDrawing(next[0].id);
+        } else {
+          setActiveId(null);
+          const canvas = canvasRef.current;
+          if (canvas) {
+            const ctx = canvas.getContext("2d");
+            if (ctx) fillCanvas(ctx, canvas.width, canvas.height);
+          }
+        }
+      }
+    },
+    [activeId, drawings, handleSwitchDrawing, fillCanvas],
+  );
+
+  const handleRenameDrawing = useCallback(
+    (id: string, name: string) => {
+      const trimmed = name.trim() || "Untitled";
+      const next = drawings.map((d) => (d.id === id ? { ...d, name: trimmed } : d));
+      setDrawings(next);
+      saveDrawings(next);
+      setEditingId(null);
+    },
+    [drawings],
+  );
+
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -133,7 +268,6 @@ export function App() {
     const w = Math.floor(rect.width);
     const h = Math.floor(rect.height);
 
-    // Save current drawing
     let imageData: ImageData | null = null;
     if (canvas.width > 0 && canvas.height > 0) {
       imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -147,7 +281,6 @@ export function App() {
 
     fillCanvas(ctx, w * dpr, h * dpr);
 
-    // Restore previous drawing
     if (imageData) {
       ctx.putImageData(imageData, 0, 0);
     }
@@ -159,7 +292,6 @@ export function App() {
     return () => window.removeEventListener("resize", resizeCanvas);
   }, [resizeCanvas]);
 
-  // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "z") {
@@ -175,7 +307,12 @@ export function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [handleUndo, handleRedo]);
 
-  // -- Drawing logic --
+  // Auto-save periodically
+  useEffect(() => {
+    if (!activeId) return;
+    const interval = setInterval(persistCurrentDrawing, 3000);
+    return () => clearInterval(interval);
+  }, [activeId, persistCurrentDrawing]);
 
   const getPos = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -212,12 +349,8 @@ export function App() {
     isDrawing.current = true;
     const pos = getPos(e);
     lastPos.current = pos;
-
-    // Draw a dot for single clicks
     const ctx = canvas.getContext("2d");
-    if (ctx) {
-      drawLine(ctx, pos, pos);
-    }
+    if (ctx) drawLine(ctx, pos, pos);
   };
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -227,9 +360,7 @@ export function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const pos = getPos(e);
-    if (lastPos.current) {
-      drawLine(ctx, lastPos.current, pos);
-    }
+    if (lastPos.current) drawLine(ctx, lastPos.current, pos);
     lastPos.current = pos;
   };
 
@@ -239,9 +370,8 @@ export function App() {
     if (canvas) canvas.releasePointerCapture(e.pointerId);
     isDrawing.current = false;
     lastPos.current = null;
+    persistCurrentDrawing();
   };
-
-  // -- Styles --
 
   const btnStyle: React.CSSProperties = {
     padding: "0.5rem 0.75rem",
@@ -271,9 +401,99 @@ export function App() {
     letterSpacing: "0.05em",
   };
 
+  const drawingsList = (
+    <div>
+      <div style={labelStyle}>Drawings</div>
+      <button
+        onClick={handleNewDrawing}
+        style={{ ...btnStyle, width: "100%", marginBottom: "0.5rem" }}
+      >
+        + New Drawing
+      </button>
+      <div className="flex flex-col gap-1" style={{ maxHeight: "14rem", overflowY: "auto" }}>
+        {drawings.map((d) => (
+          <div
+            key={d.id}
+            className="flex items-center gap-1"
+            style={{
+              padding: "0.375rem 0.5rem",
+              borderRadius: "var(--radius-btn)",
+              background: d.id === activeId ? "var(--color-accent)" : "transparent",
+              color: d.id === activeId ? "#fff" : "var(--color-ink)",
+              cursor: "pointer",
+              fontSize: "0.8125rem",
+            }}
+          >
+            {editingId === d.id ? (
+              <input
+                autoFocus
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                onBlur={() => handleRenameDrawing(d.id, editName)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleRenameDrawing(d.id, editName);
+                  if (e.key === "Escape") setEditingId(null);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  flex: 1,
+                  background: "transparent",
+                  border: "1px solid",
+                  borderColor: d.id === activeId ? "rgba(255,255,255,0.5)" : "var(--color-line)",
+                  borderRadius: "0.25rem",
+                  padding: "0.125rem 0.25rem",
+                  color: "inherit",
+                  fontSize: "inherit",
+                  fontFamily: "inherit",
+                  outline: "none",
+                }}
+              />
+            ) : (
+              <span
+                className="flex-1 truncate"
+                onClick={() => handleSwitchDrawing(d.id)}
+                onDoubleClick={() => {
+                  setEditingId(d.id);
+                  setEditName(d.name);
+                }}
+              >
+                {d.name}
+              </span>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteDrawing(d.id);
+              }}
+              title="Delete"
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                color: "inherit",
+                opacity: 0.6,
+                fontSize: "0.75rem",
+                padding: "0 0.25rem",
+                lineHeight: 1,
+              }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        {drawings.length === 0 && (
+          <div style={{ fontSize: "0.75rem", color: "var(--color-muted)", padding: "0.25rem 0.5rem" }}>
+            No saved drawings
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   const toolbar = (
     <>
-      {/* Color palette */}
+      {drawingsList}
+
       <div>
         <div style={labelStyle}>Color</div>
         <div className="flex flex-wrap gap-1.5">
@@ -336,7 +556,6 @@ export function App() {
         </div>
       </div>
 
-      {/* Brush size */}
       <div>
         <div style={labelStyle}>Size: {brushSize}px</div>
         <input
@@ -349,7 +568,6 @@ export function App() {
         />
       </div>
 
-      {/* Tools */}
       <div className="flex flex-wrap gap-2">
         <button
           onClick={() => setEraser(false)}
@@ -365,7 +583,6 @@ export function App() {
         </button>
       </div>
 
-      {/* Undo / Redo */}
       <div className="flex flex-wrap gap-2">
         <button
           onClick={handleUndo}
@@ -383,7 +600,6 @@ export function App() {
         </button>
       </div>
 
-      {/* Actions */}
       <div className="flex flex-wrap gap-2">
         <button onClick={handleClear} style={btnStyle}>
           Clear
@@ -397,12 +613,12 @@ export function App() {
 
   return (
     <Shell>
-      <div className="flex flex-col md:flex-row -m-4 md:-m-8 w-[calc(100%+2rem)] h-[calc(100%+2rem)] md:w-[calc(100%+4rem)] md:h-[calc(100%+4rem)]">
+      <div className="flex flex-col md:flex-row w-full h-full">
         {/* Desktop sidebar toolbar */}
         <div
           className="hidden md:flex flex-col gap-5 shrink-0 p-5 border-r overflow-y-auto"
           style={{
-            width: "13rem",
+            width: "14rem",
             borderColor: "var(--color-line)",
             background: "var(--color-panel)",
           }}
@@ -418,147 +634,193 @@ export function App() {
             background: "var(--color-panel)",
           }}
         >
-          <div className="flex items-center gap-1.5 shrink-0">
-            {PRESET_COLORS.map((c) => (
-              <button
-                key={c}
-                onClick={() => {
-                  setColor(c);
-                  setEraser(false);
-                }}
+          <button
+            onClick={() => setShowDrawings(!showDrawings)}
+            style={{
+              ...btnStyle,
+              padding: "0.375rem 0.5rem",
+              fontSize: "0.75rem",
+              flexShrink: 0,
+            }}
+          >
+            {showDrawings ? "Canvas" : `Drawings (${drawings.length})`}
+          </button>
+          {!showDrawings && (
+            <>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {PRESET_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => {
+                      setColor(c);
+                      setEraser(false);
+                    }}
+                    style={{
+                      width: "1.5rem",
+                      height: "1.5rem",
+                      borderRadius: "0.375rem",
+                      background: c,
+                      border:
+                        color === c && !eraser
+                          ? "2.5px solid var(--color-accent)"
+                          : "2px solid var(--color-line)",
+                      cursor: "pointer",
+                      padding: 0,
+                      flexShrink: 0,
+                    }}
+                  />
+                ))}
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={20}
+                value={brushSize}
+                onChange={(e) => setBrushSize(Number(e.target.value))}
                 style={{
-                  width: "1.5rem",
-                  height: "1.5rem",
-                  borderRadius: "0.375rem",
-                  background: c,
-                  border:
-                    color === c && !eraser
-                      ? "2.5px solid var(--color-accent)"
-                      : "2px solid var(--color-line)",
-                  cursor: "pointer",
-                  padding: 0,
+                  width: "5rem",
+                  accentColor: "var(--color-accent)",
                   flexShrink: 0,
                 }}
               />
-            ))}
-            <label
-              style={{
-                width: "1.5rem",
-                height: "1.5rem",
-                borderRadius: "0.375rem",
-                border: "2px dashed var(--color-line)",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: "0.625rem",
-                color: "var(--color-muted)",
-                position: "relative",
-                overflow: "hidden",
-                flexShrink: 0,
-              }}
-            >
-              +
-              <input
-                type="color"
-                value={color}
-                onChange={(e) => {
-                  setColor(e.target.value);
-                  setEraser(false);
-                }}
+              <button
+                onClick={() => setEraser(false)}
                 style={{
-                  position: "absolute",
-                  inset: 0,
-                  opacity: 0,
-                  cursor: "pointer",
+                  ...(!eraser ? activeBtnStyle : btnStyle),
+                  padding: "0.375rem 0.5rem",
+                  fontSize: "0.75rem",
+                  flexShrink: 0,
                 }}
-              />
-            </label>
-          </div>
-          <input
-            type="range"
-            min={1}
-            max={20}
-            value={brushSize}
-            onChange={(e) => setBrushSize(Number(e.target.value))}
-            style={{
-              width: "5rem",
-              accentColor: "var(--color-accent)",
-              flexShrink: 0,
-            }}
-          />
-          <button
-            onClick={() => setEraser(false)}
-            style={{
-              ...(!eraser ? activeBtnStyle : btnStyle),
-              padding: "0.375rem 0.5rem",
-              fontSize: "0.75rem",
-              flexShrink: 0,
-            }}
-          >
-            Pen
-          </button>
-          <button
-            onClick={() => setEraser(true)}
-            style={{
-              ...(eraser ? activeBtnStyle : btnStyle),
-              padding: "0.375rem 0.5rem",
-              fontSize: "0.75rem",
-              flexShrink: 0,
-            }}
-          >
-            Eraser
-          </button>
-          <button
-            onClick={handleUndo}
-            disabled={undoStack.length === 0}
-            style={{
-              ...btnStyle,
-              padding: "0.375rem 0.5rem",
-              fontSize: "0.75rem",
-              flexShrink: 0,
-            }}
-          >
-            Undo
-          </button>
-          <button
-            onClick={handleRedo}
-            disabled={redoStack.length === 0}
-            style={{
-              ...btnStyle,
-              padding: "0.375rem 0.5rem",
-              fontSize: "0.75rem",
-              flexShrink: 0,
-            }}
-          >
-            Redo
-          </button>
-          <button
-            onClick={handleClear}
-            style={{
-              ...btnStyle,
-              padding: "0.375rem 0.5rem",
-              fontSize: "0.75rem",
-              flexShrink: 0,
-            }}
-          >
-            Clear
-          </button>
-          <button
-            onClick={handleDownload}
-            style={{
-              ...btnStyle,
-              padding: "0.375rem 0.5rem",
-              fontSize: "0.75rem",
-              flexShrink: 0,
-            }}
-          >
-            PNG
-          </button>
+              >
+                Pen
+              </button>
+              <button
+                onClick={() => setEraser(true)}
+                style={{
+                  ...(eraser ? activeBtnStyle : btnStyle),
+                  padding: "0.375rem 0.5rem",
+                  fontSize: "0.75rem",
+                  flexShrink: 0,
+                }}
+              >
+                Eraser
+              </button>
+              <button
+                onClick={handleUndo}
+                disabled={undoStack.length === 0}
+                style={{
+                  ...btnStyle,
+                  padding: "0.375rem 0.5rem",
+                  fontSize: "0.75rem",
+                  flexShrink: 0,
+                }}
+              >
+                Undo
+              </button>
+              <button
+                onClick={handleRedo}
+                disabled={redoStack.length === 0}
+                style={{
+                  ...btnStyle,
+                  padding: "0.375rem 0.5rem",
+                  fontSize: "0.75rem",
+                  flexShrink: 0,
+                }}
+              >
+                Redo
+              </button>
+              <button
+                onClick={handleClear}
+                style={{
+                  ...btnStyle,
+                  padding: "0.375rem 0.5rem",
+                  fontSize: "0.75rem",
+                  flexShrink: 0,
+                }}
+              >
+                Clear
+              </button>
+              <button
+                onClick={handleDownload}
+                style={{
+                  ...btnStyle,
+                  padding: "0.375rem 0.5rem",
+                  fontSize: "0.75rem",
+                  flexShrink: 0,
+                }}
+              >
+                PNG
+              </button>
+            </>
+          )}
         </div>
 
+        {/* Mobile drawings panel */}
+        {showDrawings && (
+          <div
+            className="flex flex-col gap-3 p-4 md:hidden overflow-y-auto"
+            style={{ background: "var(--color-panel)" }}
+          >
+            <button
+              onClick={() => {
+                handleNewDrawing();
+                setShowDrawings(false);
+              }}
+              style={{ ...btnStyle, width: "100%" }}
+            >
+              + New Drawing
+            </button>
+            {drawings.map((d) => (
+              <div
+                key={d.id}
+                className="flex items-center gap-2"
+                style={{
+                  padding: "0.5rem 0.75rem",
+                  borderRadius: "var(--radius-btn)",
+                  background: d.id === activeId ? "var(--color-accent)" : "var(--color-paper)",
+                  color: d.id === activeId ? "#fff" : "var(--color-ink)",
+                  cursor: "pointer",
+                  border: "1px solid var(--color-line)",
+                }}
+                onClick={() => {
+                  handleSwitchDrawing(d.id);
+                  setShowDrawings(false);
+                }}
+              >
+                <span className="flex-1 truncate" style={{ fontSize: "0.875rem" }}>{d.name}</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteDrawing(d.id);
+                  }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    color: "inherit",
+                    opacity: 0.6,
+                    fontSize: "1rem",
+                    padding: "0 0.25rem",
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            {drawings.length === 0 && (
+              <div style={{ fontSize: "0.8125rem", color: "var(--color-muted)", textAlign: "center", padding: "1rem 0" }}>
+                No saved drawings yet
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Canvas */}
-        <div ref={containerRef} className="flex-1 min-h-0 min-w-0 relative">
+        <div
+          ref={containerRef}
+          className="flex-1 min-h-0 min-w-0 relative"
+          style={{ display: showDrawings ? "none" : undefined }}
+        >
           <canvas
             ref={canvasRef}
             onPointerDown={onPointerDown}
