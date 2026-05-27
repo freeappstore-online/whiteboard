@@ -82,6 +82,10 @@ function getCssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+function snapPoint(p: Point, gridSize = 20): Point {
+  return { x: Math.round(p.x / gridSize) * gridSize, y: Math.round(p.y / gridSize) * gridSize };
+}
+
 function normalizeRect(p1: Point, p2: Point): Rect {
   const x = Math.min(p1.x, p2.x);
   const y = Math.min(p1.y, p2.y);
@@ -132,6 +136,9 @@ export function App() {
 
   // Selection box state
   const [selectionBox, setSelectionBox] = useState<Rect | null>(null);
+
+  const [snapToGrid, setSnapToGrid] = useState(false);
+  const clipboardRef = useRef<SceneElement[]>([]);
 
   // Refs for rendering and interaction
   const inProgressRef = useRef<SceneElement | null>(null);
@@ -453,6 +460,33 @@ export function App() {
       }
       return next;
     });
+  }, [pushUndo]);
+
+  const copySelected = useCallback(() => {
+    const ids = selectedIdsRef.current;
+    if (ids.size === 0) return;
+    clipboardRef.current = elementsRef.current.filter((el) => ids.has(el.id));
+  }, []);
+
+  const pasteClipboard = useCallback(() => {
+    const items = clipboardRef.current;
+    if (items.length === 0) return;
+    pushUndo();
+    const offset = 20;
+    const newIds = new Set<string>();
+    const clones: SceneElement[] = items.map((el) => {
+      const newId = crypto.randomUUID();
+      newIds.add(newId);
+      if (el.type === "sticky" || el.type === "image" || el.type === "text") {
+        return { ...el, id: newId, pos: { x: el.pos.x + offset, y: el.pos.y + offset } };
+      }
+      if (el.type === "path") {
+        return { ...el, id: newId, points: el.points.map((p) => ({ x: p.x + offset, y: p.y + offset })) };
+      }
+      return { ...el, id: newId, start: { x: el.start.x + offset, y: el.start.y + offset }, end: { x: el.end.x + offset, y: el.end.y + offset } };
+    });
+    setElements((prev) => [...prev, ...clones]);
+    setSelectedIds(newIds);
   }, [pushUndo]);
 
   const handleDownloadVisible = useCallback(() => {
@@ -840,14 +874,18 @@ export function App() {
     }
 
     if (isDraggingRef.current && selectedIdsRef.current.size > 0) {
-      const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
-      // For multi-select dragging, we use the first selected element as anchor
+      let worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
       const firstId = [...selectedIdsRef.current][0]!;
       const firstEl = elementsRef.current.find((el2) => el2.id === firstId);
       if (!firstEl) return;
       const firstB = getElementBounds(firstEl);
-      const targetX = worldPos.x - dragOffsetRef.current.x;
-      const targetY = worldPos.y - dragOffsetRef.current.y;
+      let targetX = worldPos.x - dragOffsetRef.current.x;
+      let targetY = worldPos.y - dragOffsetRef.current.y;
+      if (e.shiftKey || snapToGrid) {
+        const snapped = snapPoint({ x: targetX, y: targetY });
+        targetX = snapped.x;
+        targetY = snapped.y;
+      }
       const dx = targetX - firstB.x;
       const dy = targetY - firstB.y;
       if (dx === 0 && dy === 0) return;
@@ -881,7 +919,8 @@ export function App() {
     }
 
     if (!isDrawingRef.current || !inProgressRef.current) return;
-    const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
+    let worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
+    if (e.shiftKey || snapToGrid) worldPos = snapPoint(worldPos);
     const ip = inProgressRef.current;
 
     if (ip.type === "path") {
@@ -891,7 +930,7 @@ export function App() {
       (ip as { end: Point }).end = worldPos;
     }
     renderToCanvas();
-  }, [getCanvasPos, renderToCanvas]);
+  }, [getCanvasPos, renderToCanvas, snapToGrid]);
 
   const onPointerUp = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -1031,6 +1070,16 @@ export function App() {
         persistCurrentDrawing();
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === "c") {
+        e.preventDefault();
+        copySelected();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "v" && clipboardRef.current.length > 0) {
+        e.preventDefault();
+        pasteClipboard();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "d") {
         e.preventDefault();
         duplicateSelected();
@@ -1091,7 +1140,7 @@ export function App() {
     window.addEventListener("keydown", handler);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", handler); window.removeEventListener("keyup", up); };
-  }, [handleUndo, handleRedo, pushUndo, duplicateSelected, zoomToFit, bringForward, sendBackward, deleteSelected, persistCurrentDrawing, textEditing, stickyEditing, editingId]);
+  }, [handleUndo, handleRedo, pushUndo, duplicateSelected, zoomToFit, bringForward, sendBackward, deleteSelected, persistCurrentDrawing, copySelected, pasteClipboard, textEditing, stickyEditing, editingId]);
 
   // -- Image paste --
   useEffect(() => {
@@ -1370,6 +1419,7 @@ export function App() {
         <div style={labelStyle}>View</div>
         <div className="flex flex-wrap gap-1.5">
           <button onClick={() => setShowGrid(!showGrid)} style={showGrid ? activeBtnStyle : btnStyle}>Grid</button>
+          <button onClick={() => setSnapToGrid(!snapToGrid)} style={snapToGrid ? activeBtnStyle : btnStyle} title="Snap to grid (or hold Shift)">Snap</button>
           <button onClick={() => setDarkMode(darkMode === "dark" ? "light" : darkMode === "light" ? "auto" : "dark")}
             style={btnStyle}>
             {darkMode === "dark" ? "Dark" : darkMode === "light" ? "Light" : "Auto"}
