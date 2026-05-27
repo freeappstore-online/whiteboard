@@ -22,7 +22,18 @@ const PRESET_COLORS = [
 const MAX_HISTORY = 20;
 const STORAGE_KEY = "whiteboard_drawings";
 
-type Tool = "pen" | "eraser" | "line" | "rect" | "ellipse";
+type Tool =
+  | "pen"
+  | "eraser"
+  | "line"
+  | "arrow"
+  | "rect"
+  | "ellipse"
+  | "text"
+  | "fill"
+  | "eyedropper";
+
+const SHAPE_TOOLS: Tool[] = ["line", "arrow", "rect", "ellipse"];
 
 interface Drawing {
   id: string;
@@ -56,13 +67,89 @@ function initDrawings(): { drawings: Drawing[]; activeId: string } {
   return { drawings: [fresh], activeId: id };
 }
 
-function buildCursor(size: number, erasing: boolean): string {
+function buildCursor(size: number, tool: Tool): string {
+  if (tool === "text") return "text";
+  if (tool === "fill") return "crosshair";
+  if (tool === "eyedropper") return "crosshair";
+  if (SHAPE_TOOLS.includes(tool)) return "crosshair";
   const r = Math.max(size / 2, 1.5);
   const svgSize = Math.ceil(r * 2 + 4);
   const center = svgSize / 2;
-  const stroke = erasing ? "%23999" : "%23333";
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${svgSize}' height='${svgSize}'><circle cx='${center}' cy='${center}' r='${r}' fill='none' stroke='${stroke}' stroke-width='1.5'/>${erasing ? "" : `<circle cx='${center}' cy='${center}' r='1' fill='${stroke}'/>`}</svg>`;
+  const stroke = tool === "eraser" ? "%23999" : "%23333";
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${svgSize}' height='${svgSize}'><circle cx='${center}' cy='${center}' r='${r}' fill='none' stroke='${stroke}' stroke-width='1.5'/>${tool === "eraser" ? "" : `<circle cx='${center}' cy='${center}' r='1' fill='${stroke}'/>`}</svg>`;
   return `url("data:image/svg+xml,${svg}") ${center} ${center}, crosshair`;
+}
+
+function hexFromRgb(r: number, g: number, b: number): string {
+  return "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+}
+
+function colorsMatch(a: Uint8ClampedArray, ai: number, b: Uint8ClampedArray, bi: number, tolerance: number): boolean {
+  return (
+    Math.abs(a[ai]! - b[bi]!) <= tolerance &&
+    Math.abs(a[ai + 1]! - b[bi + 1]!) <= tolerance &&
+    Math.abs(a[ai + 2]! - b[bi + 2]!) <= tolerance &&
+    Math.abs(a[ai + 3]! - b[bi + 3]!) <= tolerance
+  );
+}
+
+function floodFill(
+  ctx: CanvasRenderingContext2D,
+  startX: number,
+  startY: number,
+  fillColor: string,
+  w: number,
+  h: number,
+) {
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+  const sx = Math.round(startX);
+  const sy = Math.round(startY);
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
+
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = 1;
+  tempCanvas.height = 1;
+  const tempCtx = tempCanvas.getContext("2d")!;
+  tempCtx.fillStyle = fillColor;
+  tempCtx.fillRect(0, 0, 1, 1);
+  const fillData = tempCtx.getImageData(0, 0, 1, 1).data;
+
+  const startIdx = (sy * w + sx) * 4;
+  if (colorsMatch(data, startIdx, fillData, 0, 0)) return;
+
+  const targetR = data[startIdx]!;
+  const targetG = data[startIdx + 1]!;
+  const targetB = data[startIdx + 2]!;
+  const targetA = data[startIdx + 3]!;
+  const target = new Uint8ClampedArray([targetR, targetG, targetB, targetA]);
+  const tolerance = 30;
+
+  const stack: number[] = [sx, sy];
+  const visited = new Uint8Array(w * h);
+
+  while (stack.length > 0) {
+    const cy = stack.pop()!;
+    const cx = stack.pop()!;
+    const idx = (cy * w + cx) * 4;
+    const vi = cy * w + cx;
+
+    if (visited[vi]) continue;
+    if (!colorsMatch(data, idx, target, 0, tolerance)) continue;
+    visited[vi] = 1;
+
+    data[idx] = fillData[0]!;
+    data[idx + 1] = fillData[1]!;
+    data[idx + 2] = fillData[2]!;
+    data[idx + 3] = fillData[3]!;
+
+    if (cx > 0) stack.push(cx - 1, cy);
+    if (cx < w - 1) stack.push(cx + 1, cy);
+    if (cy > 0) stack.push(cx, cy - 1);
+    if (cy < h - 1) stack.push(cx, cy + 1);
+  }
+
+  ctx.putImageData(imageData, 0, 0);
 }
 
 export function App() {
@@ -72,12 +159,17 @@ export function App() {
   const lastPos = useRef<{ x: number; y: number } | null>(null);
   const shapeStart = useRef<{ x: number; y: number } | null>(null);
   const preDrawState = useRef<ImageData | null>(null);
+  const textInputRef = useRef<HTMLTextAreaElement>(null);
 
   const [color, setColor] = useState("#1a1a1a");
   const [brushSize, setBrushSize] = useState(4);
   const [tool, setTool] = useState<Tool>("pen");
   const [undoStack, setUndoStack] = useState<ImageData[]>([]);
   const [redoStack, setRedoStack] = useState<ImageData[]>([]);
+  const [fontSize, setFontSize] = useState(20);
+
+  const [textEditing, setTextEditing] = useState<{ x: number; y: number } | null>(null);
+  const [textValue, setTextValue] = useState("");
 
   const [initState] = useState(initDrawings);
   const [drawings, setDrawings] = useState<Drawing[]>(initState.drawings);
@@ -86,8 +178,8 @@ export function App() {
   const [editName, setEditName] = useState("");
   const [showDrawings, setShowDrawings] = useState(false);
 
-  const cursor = useMemo(() => buildCursor(brushSize, tool === "eraser"), [brushSize, tool]);
-  const isShapeTool = tool === "line" || tool === "rect" || tool === "ellipse";
+  const cursorStyle = useMemo(() => buildCursor(brushSize, tool), [brushSize, tool]);
+  const isShapeTool = SHAPE_TOOLS.includes(tool);
 
   const getCssVar = useCallback((name: string) => {
     return getComputedStyle(document.documentElement)
@@ -95,7 +187,7 @@ export function App() {
       .trim();
   }, []);
 
-  const fillCanvas = useCallback(
+  const fillCanvasBg = useCallback(
     (ctx: CanvasRenderingContext2D, w: number, h: number) => {
       ctx.fillStyle = getCssVar("--color-paper");
       ctx.fillRect(0, 0, w, h);
@@ -176,8 +268,8 @@ export function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     saveState();
-    fillCanvas(ctx, canvas.width, canvas.height);
-  }, [saveState, fillCanvas]);
+    fillCanvasBg(ctx, canvas.width, canvas.height);
+  }, [saveState, fillCanvasBg]);
 
   const handleDownload = useCallback(() => {
     const canvas = canvasRef.current;
@@ -197,7 +289,7 @@ export function App() {
       if (!ctx) return;
       const img = new Image();
       img.onload = () => {
-        fillCanvas(ctx, canvas.width, canvas.height);
+        fillCanvasBg(ctx, canvas.width, canvas.height);
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.drawImage(img, 0, 0, Math.min(img.width, canvas.width), Math.min(img.height, canvas.height));
@@ -207,7 +299,7 @@ export function App() {
       };
       img.src = dataUrl;
     },
-    [fillCanvas],
+    [fillCanvasBg],
   );
 
   const handleNewDrawing = useCallback(() => {
@@ -228,9 +320,9 @@ export function App() {
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext("2d");
-      if (ctx) fillCanvas(ctx, canvas.width, canvas.height);
+      if (ctx) fillCanvasBg(ctx, canvas.width, canvas.height);
     }
-  }, [persistCurrentDrawing, drawings, fillCanvas]);
+  }, [persistCurrentDrawing, drawings, fillCanvasBg]);
 
   const handleSwitchDrawing = useCallback(
     (id: string) => {
@@ -246,11 +338,11 @@ export function App() {
         const canvas = canvasRef.current;
         if (canvas) {
           const ctx = canvas.getContext("2d");
-          if (ctx) fillCanvas(ctx, canvas.width, canvas.height);
+          if (ctx) fillCanvasBg(ctx, canvas.width, canvas.height);
         }
       }
     },
-    [activeId, persistCurrentDrawing, drawings, loadDrawingToCanvas, fillCanvas],
+    [activeId, persistCurrentDrawing, drawings, loadDrawingToCanvas, fillCanvasBg],
   );
 
   const handleDeleteDrawing = useCallback(
@@ -277,6 +369,33 @@ export function App() {
     [drawings],
   );
 
+  const commitText = useCallback(() => {
+    if (!textEditing || !textValue.trim()) {
+      setTextEditing(null);
+      setTextValue("");
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    saveState();
+    const dpr = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.font = `${fontSize}px Manrope, system-ui, sans-serif`;
+    ctx.fillStyle = color;
+    ctx.textBaseline = "top";
+    const lines = textValue.split("\n");
+    lines.forEach((line, i) => {
+      ctx.fillText(line, textEditing.x, textEditing.y + i * (fontSize * 1.3));
+    });
+    ctx.restore();
+    setTextEditing(null);
+    setTextValue("");
+    persistCurrentDrawing();
+  }, [textEditing, textValue, fontSize, color, saveState, persistCurrentDrawing]);
+
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -300,12 +419,12 @@ export function App() {
     canvas.style.height = `${h}px`;
     ctx.scale(dpr, dpr);
 
-    fillCanvas(ctx, w * dpr, h * dpr);
+    fillCanvasBg(ctx, w * dpr, h * dpr);
 
     if (imageData) {
       ctx.putImageData(imageData, 0, 0);
     }
-  }, [fillCanvas]);
+  }, [fillCanvasBg]);
 
   useEffect(() => {
     resizeCanvas();
@@ -313,7 +432,6 @@ export function App() {
     return () => window.removeEventListener("resize", resizeCanvas);
   }, [resizeCanvas]);
 
-  // Load active drawing after first mount
   useEffect(() => {
     const drawing = initState.drawings.find((d) => d.id === initState.activeId);
     if (drawing?.dataUrl) {
@@ -324,6 +442,7 @@ export function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (textEditing) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "z") {
         e.preventDefault();
         if (e.shiftKey) {
@@ -335,13 +454,19 @@ export function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleUndo, handleRedo]);
+  }, [handleUndo, handleRedo, textEditing]);
 
   useEffect(() => {
     if (!activeId) return;
     const interval = setInterval(persistCurrentDrawing, 3000);
     return () => clearInterval(interval);
   }, [activeId, persistCurrentDrawing]);
+
+  useEffect(() => {
+    if (textEditing && textInputRef.current) {
+      textInputRef.current.focus();
+    }
+  }, [textEditing]);
 
   const getPos = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -365,7 +490,7 @@ export function App() {
     ctx.restore();
   };
 
-  const drawLine = (
+  const drawFreehand = (
     ctx: CanvasRenderingContext2D,
     from: { x: number; y: number },
     to: { x: number; y: number },
@@ -376,6 +501,27 @@ export function App() {
       c.lineTo(to.x, to.y);
       c.stroke();
     });
+  };
+
+  const drawArrowhead = (
+    c: CanvasRenderingContext2D,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+  ) => {
+    const headLen = Math.max(brushSize * 3, 12);
+    const angle = Math.atan2(to.y - from.y, to.x - from.x);
+    c.beginPath();
+    c.moveTo(to.x, to.y);
+    c.lineTo(
+      to.x - headLen * Math.cos(angle - Math.PI / 6),
+      to.y - headLen * Math.sin(angle - Math.PI / 6),
+    );
+    c.moveTo(to.x, to.y);
+    c.lineTo(
+      to.x - headLen * Math.cos(angle + Math.PI / 6),
+      to.y - headLen * Math.sin(angle + Math.PI / 6),
+    );
+    c.stroke();
   };
 
   const drawShape = (
@@ -389,16 +535,25 @@ export function App() {
       if (shape === "line") {
         c.moveTo(start.x, start.y);
         c.lineTo(end.x, end.y);
+        c.stroke();
+      } else if (shape === "arrow") {
+        c.moveTo(start.x, start.y);
+        c.lineTo(end.x, end.y);
+        c.stroke();
+        drawArrowhead(c, start, end);
       } else if (shape === "rect") {
         c.rect(start.x, start.y, end.x - start.x, end.y - start.y);
+        c.stroke();
       } else if (shape === "ellipse") {
         const cx = (start.x + end.x) / 2;
         const cy = (start.y + end.y) / 2;
         const rx = Math.abs(end.x - start.x) / 2;
         const ry = Math.abs(end.y - start.y) / 2;
-        c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        if (rx > 0 && ry > 0) {
+          c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+          c.stroke();
+        }
       }
-      c.stroke();
     });
   };
 
@@ -406,10 +561,40 @@ export function App() {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const pos = getPos(e);
+
+    if (tool === "text") {
+      if (textEditing) commitText();
+      setTextEditing(pos);
+      setTextValue("");
+      return;
+    }
+
+    if (tool === "eyedropper") {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const dpr = window.devicePixelRatio || 1;
+      const px = Math.round(pos.x * dpr);
+      const py = Math.round(pos.y * dpr);
+      const pixel = ctx.getImageData(px, py, 1, 1).data;
+      setColor(hexFromRgb(pixel[0]!, pixel[1]!, pixel[2]!));
+      setTool("pen");
+      return;
+    }
+
+    if (tool === "fill") {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      saveState();
+      const dpr = window.devicePixelRatio || 1;
+      floodFill(ctx, pos.x * dpr, pos.y * dpr, color, canvas.width, canvas.height);
+      persistCurrentDrawing();
+      return;
+    }
+
     canvas.setPointerCapture(e.pointerId);
     saveState();
     isDrawing.current = true;
-    const pos = getPos(e);
     lastPos.current = pos;
 
     if (isShapeTool) {
@@ -420,7 +605,7 @@ export function App() {
       }
     } else {
       const ctx = canvas.getContext("2d");
-      if (ctx) drawLine(ctx, pos, pos);
+      if (ctx) drawFreehand(ctx, pos, pos);
     }
   };
 
@@ -436,7 +621,7 @@ export function App() {
       ctx.putImageData(preDrawState.current, 0, 0);
       drawShape(ctx, shapeStart.current, pos, tool);
     } else {
-      if (lastPos.current) drawLine(ctx, lastPos.current, pos);
+      if (lastPos.current) drawFreehand(ctx, lastPos.current, pos);
       lastPos.current = pos;
     }
   };
@@ -460,6 +645,8 @@ export function App() {
     preDrawState.current = null;
     persistCurrentDrawing();
   };
+
+  // -- Styles --
 
   const btnStyle: React.CSSProperties = {
     padding: "0.5rem 0.75rem",
@@ -499,12 +686,27 @@ export function App() {
     </button>
   );
 
-  const drawingItem = (d: Drawing, compact?: boolean) => (
+  const mobileToolBtn = (t: Tool, label: string) => (
+    <button
+      key={t}
+      onClick={() => setTool(t)}
+      style={{
+        ...(tool === t ? activeBtnStyle : btnStyle),
+        padding: "0.375rem 0.5rem",
+        fontSize: "0.75rem",
+        flexShrink: 0,
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  const drawingItem = (d: Drawing) => (
     <div
       key={d.id}
       className="flex items-center gap-1.5"
       style={{
-        padding: compact ? "0.375rem 0.5rem" : "0.375rem 0.5rem",
+        padding: "0.375rem 0.5rem",
         borderRadius: "var(--radius-btn)",
         background: d.id === activeId ? "var(--color-accent)" : "transparent",
         color: d.id === activeId ? "#fff" : "var(--color-ink)",
@@ -668,7 +870,7 @@ export function App() {
       </div>
 
       <div>
-        <div style={labelStyle}>Size: {brushSize}px</div>
+        <div style={labelStyle}>Brush: {brushSize}px</div>
         <input
           type="range"
           min={1}
@@ -679,63 +881,55 @@ export function App() {
         />
       </div>
 
+      {tool === "text" && (
+        <div>
+          <div style={labelStyle}>Font: {fontSize}px</div>
+          <input
+            type="range"
+            min={10}
+            max={72}
+            value={fontSize}
+            onChange={(e) => setFontSize(Number(e.target.value))}
+            style={{ width: "100%", accentColor: "var(--color-accent)" }}
+          />
+        </div>
+      )}
+
       <div>
         <div style={labelStyle}>Tool</div>
         <div className="flex flex-wrap gap-1.5">
           {toolBtn("pen", "Pen")}
           {toolBtn("eraser", "Eraser")}
           {toolBtn("line", "Line")}
+          {toolBtn("arrow", "Arrow")}
           {toolBtn("rect", "Rect")}
           {toolBtn("ellipse", "Ellipse")}
+          {toolBtn("text", "Text")}
+          {toolBtn("fill", "Fill")}
+          {toolBtn("eyedropper", "Pick")}
         </div>
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <button
-          onClick={handleUndo}
-          style={btnStyle}
-          disabled={undoStack.length === 0}
-        >
+        <button onClick={handleUndo} style={btnStyle} disabled={undoStack.length === 0}>
           Undo
         </button>
-        <button
-          onClick={handleRedo}
-          style={btnStyle}
-          disabled={redoStack.length === 0}
-        >
+        <button onClick={handleRedo} style={btnStyle} disabled={redoStack.length === 0}>
           Redo
         </button>
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <button onClick={handleClear} style={btnStyle}>
-          Clear
-        </button>
-        <button onClick={handleDownload} style={btnStyle}>
-          Save PNG
-        </button>
+        <button onClick={handleClear} style={btnStyle}>Clear</button>
+        <button onClick={handleDownload} style={btnStyle}>Save PNG</button>
       </div>
     </>
-  );
-
-  const mobileToolBtn = (t: Tool, label: string) => (
-    <button
-      key={t}
-      onClick={() => setTool(t)}
-      style={{
-        ...(tool === t ? activeBtnStyle : btnStyle),
-        padding: "0.375rem 0.5rem",
-        fontSize: "0.75rem",
-        flexShrink: 0,
-      }}
-    >
-      {label}
-    </button>
   );
 
   return (
     <Shell>
       <div className="flex flex-col md:flex-row w-full h-full">
+        {/* Desktop sidebar */}
         <div
           className="hidden md:flex flex-col gap-5 shrink-0 p-5 border-r overflow-y-auto"
           style={{
@@ -747,6 +941,7 @@ export function App() {
           {toolbar}
         </div>
 
+        {/* Mobile toolbar */}
         <div
           className="flex md:hidden items-center gap-3 px-3 py-2 border-b overflow-x-auto shrink-0"
           style={{
@@ -797,60 +992,40 @@ export function App() {
                 max={20}
                 value={brushSize}
                 onChange={(e) => setBrushSize(Number(e.target.value))}
-                style={{
-                  width: "5rem",
-                  accentColor: "var(--color-accent)",
-                  flexShrink: 0,
-                }}
+                style={{ width: "5rem", accentColor: "var(--color-accent)", flexShrink: 0 }}
               />
               {mobileToolBtn("pen", "Pen")}
               {mobileToolBtn("eraser", "Eraser")}
               {mobileToolBtn("line", "Line")}
+              {mobileToolBtn("arrow", "Arrow")}
               {mobileToolBtn("rect", "Rect")}
               {mobileToolBtn("ellipse", "Ellipse")}
+              {mobileToolBtn("text", "Text")}
+              {mobileToolBtn("fill", "Fill")}
+              {mobileToolBtn("eyedropper", "Pick")}
               <button
                 onClick={handleUndo}
                 disabled={undoStack.length === 0}
-                style={{
-                  ...btnStyle,
-                  padding: "0.375rem 0.5rem",
-                  fontSize: "0.75rem",
-                  flexShrink: 0,
-                }}
+                style={{ ...btnStyle, padding: "0.375rem 0.5rem", fontSize: "0.75rem", flexShrink: 0 }}
               >
                 Undo
               </button>
               <button
                 onClick={handleRedo}
                 disabled={redoStack.length === 0}
-                style={{
-                  ...btnStyle,
-                  padding: "0.375rem 0.5rem",
-                  fontSize: "0.75rem",
-                  flexShrink: 0,
-                }}
+                style={{ ...btnStyle, padding: "0.375rem 0.5rem", fontSize: "0.75rem", flexShrink: 0 }}
               >
                 Redo
               </button>
               <button
                 onClick={handleClear}
-                style={{
-                  ...btnStyle,
-                  padding: "0.375rem 0.5rem",
-                  fontSize: "0.75rem",
-                  flexShrink: 0,
-                }}
+                style={{ ...btnStyle, padding: "0.375rem 0.5rem", fontSize: "0.75rem", flexShrink: 0 }}
               >
                 Clear
               </button>
               <button
                 onClick={handleDownload}
-                style={{
-                  ...btnStyle,
-                  padding: "0.375rem 0.5rem",
-                  fontSize: "0.75rem",
-                  flexShrink: 0,
-                }}
+                style={{ ...btnStyle, padding: "0.375rem 0.5rem", fontSize: "0.75rem", flexShrink: 0 }}
               >
                 PNG
               </button>
@@ -858,16 +1033,14 @@ export function App() {
           )}
         </div>
 
+        {/* Mobile drawings panel */}
         {showDrawings && (
           <div
             className="flex flex-col gap-3 p-4 md:hidden overflow-y-auto"
             style={{ background: "var(--color-panel)" }}
           >
             <button
-              onClick={() => {
-                handleNewDrawing();
-                setShowDrawings(false);
-              }}
+              onClick={() => { handleNewDrawing(); setShowDrawings(false); }}
               style={{ ...btnStyle, width: "100%" }}
             >
               + New Drawing
@@ -884,10 +1057,7 @@ export function App() {
                   cursor: "pointer",
                   border: "1px solid var(--color-line)",
                 }}
-                onClick={() => {
-                  handleSwitchDrawing(d.id);
-                  setShowDrawings(false);
-                }}
+                onClick={() => { handleSwitchDrawing(d.id); setShowDrawings(false); }}
               >
                 {d.dataUrl && (
                   <img
@@ -907,18 +1077,10 @@ export function App() {
                 <span className="flex-1 truncate" style={{ fontSize: "0.875rem" }}>{d.name}</span>
                 {drawings.length > 1 && (
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteDrawing(d.id);
-                    }}
+                    onClick={(e) => { e.stopPropagation(); handleDeleteDrawing(d.id); }}
                     style={{
-                      background: "none",
-                      border: "none",
-                      cursor: "pointer",
-                      color: "inherit",
-                      opacity: 0.6,
-                      fontSize: "1rem",
-                      padding: "0 0.25rem",
+                      background: "none", border: "none", cursor: "pointer",
+                      color: "inherit", opacity: 0.6, fontSize: "1rem", padding: "0 0.25rem",
                     }}
                   >
                     ×
@@ -929,6 +1091,7 @@ export function App() {
           </div>
         )}
 
+        {/* Canvas area */}
         <div
           ref={containerRef}
           className="flex-1 min-h-0 min-w-0 relative"
@@ -944,9 +1107,46 @@ export function App() {
               position: "absolute",
               inset: 0,
               touchAction: "none",
-              cursor,
+              cursor: cursorStyle,
             }}
           />
+          {textEditing && (
+            <textarea
+              ref={textInputRef}
+              value={textValue}
+              onChange={(e) => setTextValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  commitText();
+                }
+                if (e.key === "Escape") {
+                  setTextEditing(null);
+                  setTextValue("");
+                }
+              }}
+              onBlur={commitText}
+              placeholder="Type here..."
+              style={{
+                position: "absolute",
+                left: textEditing.x,
+                top: textEditing.y,
+                fontSize: `${fontSize}px`,
+                fontFamily: "Manrope, system-ui, sans-serif",
+                color,
+                background: "transparent",
+                border: "1.5px dashed var(--color-accent)",
+                borderRadius: "0.25rem",
+                padding: "0.125rem 0.25rem",
+                outline: "none",
+                resize: "both",
+                minWidth: "6rem",
+                minHeight: `${fontSize * 1.5}px`,
+                lineHeight: 1.3,
+                zIndex: 10,
+              }}
+            />
+          )}
         </div>
       </div>
     </Shell>
