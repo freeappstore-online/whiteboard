@@ -4,6 +4,7 @@ import {
   useEffect,
   useState,
   useCallback,
+  useMemo,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
@@ -20,6 +21,8 @@ const PRESET_COLORS = [
 
 const MAX_HISTORY = 20;
 const STORAGE_KEY = "whiteboard_drawings";
+
+type Tool = "pen" | "eraser" | "line" | "rect" | "ellipse";
 
 interface Drawing {
   id: string;
@@ -42,23 +45,49 @@ function saveDrawings(drawings: Drawing[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(drawings));
 }
 
+function initDrawings(): { drawings: Drawing[]; activeId: string } {
+  const existing = loadDrawings();
+  if (existing.length > 0 && existing[0]) {
+    return { drawings: existing, activeId: existing[0].id };
+  }
+  const id = crypto.randomUUID();
+  const fresh: Drawing = { id, name: "Drawing 1", dataUrl: "", updatedAt: Date.now() };
+  saveDrawings([fresh]);
+  return { drawings: [fresh], activeId: id };
+}
+
+function buildCursor(size: number, erasing: boolean): string {
+  const r = Math.max(size / 2, 1.5);
+  const svgSize = Math.ceil(r * 2 + 4);
+  const center = svgSize / 2;
+  const stroke = erasing ? "%23999" : "%23333";
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${svgSize}' height='${svgSize}'><circle cx='${center}' cy='${center}' r='${r}' fill='none' stroke='${stroke}' stroke-width='1.5'/>${erasing ? "" : `<circle cx='${center}' cy='${center}' r='1' fill='${stroke}'/>`}</svg>`;
+  return `url("data:image/svg+xml,${svg}") ${center} ${center}, crosshair`;
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isDrawing = useRef(false);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
+  const shapeStart = useRef<{ x: number; y: number } | null>(null);
+  const preDrawState = useRef<ImageData | null>(null);
 
   const [color, setColor] = useState("#1a1a1a");
   const [brushSize, setBrushSize] = useState(4);
-  const [eraser, setEraser] = useState(false);
+  const [tool, setTool] = useState<Tool>("pen");
   const [undoStack, setUndoStack] = useState<ImageData[]>([]);
   const [redoStack, setRedoStack] = useState<ImageData[]>([]);
 
-  const [drawings, setDrawings] = useState<Drawing[]>(loadDrawings);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [initState] = useState(initDrawings);
+  const [drawings, setDrawings] = useState<Drawing[]>(initState.drawings);
+  const [activeId, setActiveId] = useState<string>(initState.activeId);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [showDrawings, setShowDrawings] = useState(false);
+
+  const cursor = useMemo(() => buildCursor(brushSize, tool === "eraser"), [brushSize, tool]);
+  const isShapeTool = tool === "line" || tool === "rect" || tool === "ellipse";
 
   const getCssVar = useCallback((name: string) => {
     return getComputedStyle(document.documentElement)
@@ -169,10 +198,10 @@ export function App() {
       const img = new Image();
       img.onload = () => {
         fillCanvas(ctx, canvas.width, canvas.height);
-        const dpr = window.devicePixelRatio || 1;
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.drawImage(img, 0, 0, Math.min(img.width, canvas.width), Math.min(img.height, canvas.height));
+        const dpr = window.devicePixelRatio || 1;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.restore();
       };
@@ -182,7 +211,7 @@ export function App() {
   );
 
   const handleNewDrawing = useCallback(() => {
-    if (activeId) persistCurrentDrawing();
+    persistCurrentDrawing();
     const id = crypto.randomUUID();
     const drawing: Drawing = {
       id,
@@ -201,12 +230,12 @@ export function App() {
       const ctx = canvas.getContext("2d");
       if (ctx) fillCanvas(ctx, canvas.width, canvas.height);
     }
-  }, [activeId, persistCurrentDrawing, drawings, fillCanvas]);
+  }, [persistCurrentDrawing, drawings, fillCanvas]);
 
   const handleSwitchDrawing = useCallback(
     (id: string) => {
       if (id === activeId) return;
-      if (activeId) persistCurrentDrawing();
+      persistCurrentDrawing();
       setActiveId(id);
       setUndoStack([]);
       setRedoStack([]);
@@ -227,22 +256,14 @@ export function App() {
   const handleDeleteDrawing = useCallback(
     (id: string) => {
       const next = drawings.filter((d) => d.id !== id);
+      if (next.length === 0) return;
       setDrawings(next);
       saveDrawings(next);
-      if (activeId === id) {
-        if (next.length > 0 && next[0]) {
-          handleSwitchDrawing(next[0].id);
-        } else {
-          setActiveId(null);
-          const canvas = canvasRef.current;
-          if (canvas) {
-            const ctx = canvas.getContext("2d");
-            if (ctx) fillCanvas(ctx, canvas.width, canvas.height);
-          }
-        }
+      if (activeId === id && next[0]) {
+        handleSwitchDrawing(next[0].id);
       }
     },
-    [activeId, drawings, handleSwitchDrawing, fillCanvas],
+    [activeId, drawings, handleSwitchDrawing],
   );
 
   const handleRenameDrawing = useCallback(
@@ -292,6 +313,15 @@ export function App() {
     return () => window.removeEventListener("resize", resizeCanvas);
   }, [resizeCanvas]);
 
+  // Load active drawing after first mount
+  useEffect(() => {
+    const drawing = initState.drawings.find((d) => d.id === initState.activeId);
+    if (drawing?.dataUrl) {
+      setTimeout(() => loadDrawingToCanvas(drawing.dataUrl), 50);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "z") {
@@ -307,7 +337,6 @@ export function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [handleUndo, handleRedo]);
 
-  // Auto-save periodically
   useEffect(() => {
     if (!activeId) return;
     const interval = setInterval(persistCurrentDrawing, 3000);
@@ -321,23 +350,56 @@ export function App() {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
+  const strokeOnCanvas = (
+    ctx: CanvasRenderingContext2D,
+    fn: (ctx: CanvasRenderingContext2D) => void,
+  ) => {
+    const dpr = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = tool === "eraser" ? getCssVar("--color-paper") : color;
+    ctx.lineWidth = brushSize;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    fn(ctx);
+    ctx.restore();
+  };
+
   const drawLine = (
     ctx: CanvasRenderingContext2D,
     from: { x: number; y: number },
     to: { x: number; y: number },
   ) => {
-    const dpr = window.devicePixelRatio || 1;
-    ctx.save();
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.strokeStyle = eraser ? getCssVar("--color-paper") : color;
-    ctx.lineWidth = brushSize;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.stroke();
-    ctx.restore();
+    strokeOnCanvas(ctx, (c) => {
+      c.beginPath();
+      c.moveTo(from.x, from.y);
+      c.lineTo(to.x, to.y);
+      c.stroke();
+    });
+  };
+
+  const drawShape = (
+    ctx: CanvasRenderingContext2D,
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    shape: Tool,
+  ) => {
+    strokeOnCanvas(ctx, (c) => {
+      c.beginPath();
+      if (shape === "line") {
+        c.moveTo(start.x, start.y);
+        c.lineTo(end.x, end.y);
+      } else if (shape === "rect") {
+        c.rect(start.x, start.y, end.x - start.x, end.y - start.y);
+      } else if (shape === "ellipse") {
+        const cx = (start.x + end.x) / 2;
+        const cy = (start.y + end.y) / 2;
+        const rx = Math.abs(end.x - start.x) / 2;
+        const ry = Math.abs(end.y - start.y) / 2;
+        c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      }
+      c.stroke();
+    });
   };
 
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -349,8 +411,17 @@ export function App() {
     isDrawing.current = true;
     const pos = getPos(e);
     lastPos.current = pos;
-    const ctx = canvas.getContext("2d");
-    if (ctx) drawLine(ctx, pos, pos);
+
+    if (isShapeTool) {
+      shapeStart.current = pos;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        preDrawState.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      }
+    } else {
+      const ctx = canvas.getContext("2d");
+      if (ctx) drawLine(ctx, pos, pos);
+    }
   };
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -360,16 +431,33 @@ export function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const pos = getPos(e);
-    if (lastPos.current) drawLine(ctx, lastPos.current, pos);
-    lastPos.current = pos;
+
+    if (isShapeTool && shapeStart.current && preDrawState.current) {
+      ctx.putImageData(preDrawState.current, 0, 0);
+      drawShape(ctx, shapeStart.current, pos, tool);
+    } else {
+      if (lastPos.current) drawLine(ctx, lastPos.current, pos);
+      lastPos.current = pos;
+    }
   };
 
   const onPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     if (!isDrawing.current) return;
     const canvas = canvasRef.current;
     if (canvas) canvas.releasePointerCapture(e.pointerId);
+
+    if (isShapeTool && shapeStart.current && preDrawState.current && canvas) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.putImageData(preDrawState.current, 0, 0);
+        drawShape(ctx, shapeStart.current, getPos(e), tool);
+      }
+    }
+
     isDrawing.current = false;
     lastPos.current = null;
+    shapeStart.current = null;
+    preDrawState.current = null;
     persistCurrentDrawing();
   };
 
@@ -401,98 +489,121 @@ export function App() {
     letterSpacing: "0.05em",
   };
 
-  const drawingsList = (
-    <div>
-      <div style={labelStyle}>Drawings</div>
-      <button
-        onClick={handleNewDrawing}
-        style={{ ...btnStyle, width: "100%", marginBottom: "0.5rem" }}
-      >
-        + New Drawing
-      </button>
-      <div className="flex flex-col gap-1" style={{ maxHeight: "14rem", overflowY: "auto" }}>
-        {drawings.map((d) => (
-          <div
-            key={d.id}
-            className="flex items-center gap-1"
-            style={{
-              padding: "0.375rem 0.5rem",
-              borderRadius: "var(--radius-btn)",
-              background: d.id === activeId ? "var(--color-accent)" : "transparent",
-              color: d.id === activeId ? "#fff" : "var(--color-ink)",
-              cursor: "pointer",
-              fontSize: "0.8125rem",
-            }}
-          >
-            {editingId === d.id ? (
-              <input
-                autoFocus
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                onBlur={() => handleRenameDrawing(d.id, editName)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleRenameDrawing(d.id, editName);
-                  if (e.key === "Escape") setEditingId(null);
-                }}
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  flex: 1,
-                  background: "transparent",
-                  border: "1px solid",
-                  borderColor: d.id === activeId ? "rgba(255,255,255,0.5)" : "var(--color-line)",
-                  borderRadius: "0.25rem",
-                  padding: "0.125rem 0.25rem",
-                  color: "inherit",
-                  fontSize: "inherit",
-                  fontFamily: "inherit",
-                  outline: "none",
-                }}
-              />
-            ) : (
-              <span
-                className="flex-1 truncate"
-                onClick={() => handleSwitchDrawing(d.id)}
-                onDoubleClick={() => {
-                  setEditingId(d.id);
-                  setEditName(d.name);
-                }}
-              >
-                {d.name}
-              </span>
-            )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDeleteDrawing(d.id);
-              }}
-              title="Delete"
-              style={{
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                color: "inherit",
-                opacity: 0.6,
-                fontSize: "0.75rem",
-                padding: "0 0.25rem",
-                lineHeight: 1,
-              }}
-            >
-              ×
-            </button>
-          </div>
-        ))}
-        {drawings.length === 0 && (
-          <div style={{ fontSize: "0.75rem", color: "var(--color-muted)", padding: "0.25rem 0.5rem" }}>
-            No saved drawings
-          </div>
-        )}
-      </div>
+  const toolBtn = (t: Tool, label: string) => (
+    <button
+      key={t}
+      onClick={() => setTool(t)}
+      style={tool === t ? activeBtnStyle : btnStyle}
+    >
+      {label}
+    </button>
+  );
+
+  const drawingItem = (d: Drawing, compact?: boolean) => (
+    <div
+      key={d.id}
+      className="flex items-center gap-1.5"
+      style={{
+        padding: compact ? "0.375rem 0.5rem" : "0.375rem 0.5rem",
+        borderRadius: "var(--radius-btn)",
+        background: d.id === activeId ? "var(--color-accent)" : "transparent",
+        color: d.id === activeId ? "#fff" : "var(--color-ink)",
+        cursor: "pointer",
+        fontSize: "0.8125rem",
+      }}
+    >
+      {d.dataUrl && (
+        <img
+          src={d.dataUrl}
+          alt=""
+          style={{
+            width: "2rem",
+            height: "1.5rem",
+            objectFit: "cover",
+            borderRadius: "0.25rem",
+            border: "1px solid",
+            borderColor: d.id === activeId ? "rgba(255,255,255,0.3)" : "var(--color-line)",
+            flexShrink: 0,
+          }}
+        />
+      )}
+      {editingId === d.id ? (
+        <input
+          autoFocus
+          value={editName}
+          onChange={(e) => setEditName(e.target.value)}
+          onBlur={() => handleRenameDrawing(d.id, editName)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleRenameDrawing(d.id, editName);
+            if (e.key === "Escape") setEditingId(null);
+          }}
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            flex: 1,
+            background: "transparent",
+            border: "1px solid",
+            borderColor: d.id === activeId ? "rgba(255,255,255,0.5)" : "var(--color-line)",
+            borderRadius: "0.25rem",
+            padding: "0.125rem 0.25rem",
+            color: "inherit",
+            fontSize: "inherit",
+            fontFamily: "inherit",
+            outline: "none",
+            minWidth: 0,
+          }}
+        />
+      ) : (
+        <span
+          className="flex-1 truncate"
+          onClick={() => handleSwitchDrawing(d.id)}
+          onDoubleClick={() => {
+            setEditingId(d.id);
+            setEditName(d.name);
+          }}
+          style={{ minWidth: 0 }}
+        >
+          {d.name}
+        </span>
+      )}
+      {drawings.length > 1 && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleDeleteDrawing(d.id);
+          }}
+          title="Delete"
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            color: "inherit",
+            opacity: 0.6,
+            fontSize: "0.75rem",
+            padding: "0 0.25rem",
+            lineHeight: 1,
+            flexShrink: 0,
+          }}
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 
   const toolbar = (
     <>
-      {drawingsList}
+      <div>
+        <div style={labelStyle}>Drawings</div>
+        <button
+          onClick={handleNewDrawing}
+          style={{ ...btnStyle, width: "100%", marginBottom: "0.5rem" }}
+        >
+          + New Drawing
+        </button>
+        <div className="flex flex-col gap-0.5" style={{ maxHeight: "12rem", overflowY: "auto" }}>
+          {drawings.map((d) => drawingItem(d))}
+        </div>
+      </div>
 
       <div>
         <div style={labelStyle}>Color</div>
@@ -502,7 +613,7 @@ export function App() {
               key={c}
               onClick={() => {
                 setColor(c);
-                setEraser(false);
+                if (tool === "eraser") setTool("pen");
               }}
               title={c}
               style={{
@@ -511,7 +622,7 @@ export function App() {
                 borderRadius: "var(--radius-btn)",
                 background: c,
                 border:
-                  color === c && !eraser
+                  color === c && tool !== "eraser"
                     ? "2.5px solid var(--color-accent)"
                     : "2px solid var(--color-line)",
                 cursor: "pointer",
@@ -543,7 +654,7 @@ export function App() {
               value={color}
               onChange={(e) => {
                 setColor(e.target.value);
-                setEraser(false);
+                if (tool === "eraser") setTool("pen");
               }}
               style={{
                 position: "absolute",
@@ -568,19 +679,15 @@ export function App() {
         />
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => setEraser(false)}
-          style={!eraser ? activeBtnStyle : btnStyle}
-        >
-          Pen
-        </button>
-        <button
-          onClick={() => setEraser(true)}
-          style={eraser ? activeBtnStyle : btnStyle}
-        >
-          Eraser
-        </button>
+      <div>
+        <div style={labelStyle}>Tool</div>
+        <div className="flex flex-wrap gap-1.5">
+          {toolBtn("pen", "Pen")}
+          {toolBtn("eraser", "Eraser")}
+          {toolBtn("line", "Line")}
+          {toolBtn("rect", "Rect")}
+          {toolBtn("ellipse", "Ellipse")}
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -611,10 +718,24 @@ export function App() {
     </>
   );
 
+  const mobileToolBtn = (t: Tool, label: string) => (
+    <button
+      key={t}
+      onClick={() => setTool(t)}
+      style={{
+        ...(tool === t ? activeBtnStyle : btnStyle),
+        padding: "0.375rem 0.5rem",
+        fontSize: "0.75rem",
+        flexShrink: 0,
+      }}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <Shell>
       <div className="flex flex-col md:flex-row w-full h-full">
-        {/* Desktop sidebar toolbar */}
         <div
           className="hidden md:flex flex-col gap-5 shrink-0 p-5 border-r overflow-y-auto"
           style={{
@@ -626,7 +747,6 @@ export function App() {
           {toolbar}
         </div>
 
-        {/* Mobile toolbar above canvas */}
         <div
           className="flex md:hidden items-center gap-3 px-3 py-2 border-b overflow-x-auto shrink-0"
           style={{
@@ -653,7 +773,7 @@ export function App() {
                     key={c}
                     onClick={() => {
                       setColor(c);
-                      setEraser(false);
+                      if (tool === "eraser") setTool("pen");
                     }}
                     style={{
                       width: "1.5rem",
@@ -661,7 +781,7 @@ export function App() {
                       borderRadius: "0.375rem",
                       background: c,
                       border:
-                        color === c && !eraser
+                        color === c && tool !== "eraser"
                           ? "2.5px solid var(--color-accent)"
                           : "2px solid var(--color-line)",
                       cursor: "pointer",
@@ -683,28 +803,11 @@ export function App() {
                   flexShrink: 0,
                 }}
               />
-              <button
-                onClick={() => setEraser(false)}
-                style={{
-                  ...(!eraser ? activeBtnStyle : btnStyle),
-                  padding: "0.375rem 0.5rem",
-                  fontSize: "0.75rem",
-                  flexShrink: 0,
-                }}
-              >
-                Pen
-              </button>
-              <button
-                onClick={() => setEraser(true)}
-                style={{
-                  ...(eraser ? activeBtnStyle : btnStyle),
-                  padding: "0.375rem 0.5rem",
-                  fontSize: "0.75rem",
-                  flexShrink: 0,
-                }}
-              >
-                Eraser
-              </button>
+              {mobileToolBtn("pen", "Pen")}
+              {mobileToolBtn("eraser", "Eraser")}
+              {mobileToolBtn("line", "Line")}
+              {mobileToolBtn("rect", "Rect")}
+              {mobileToolBtn("ellipse", "Ellipse")}
               <button
                 onClick={handleUndo}
                 disabled={undoStack.length === 0}
@@ -755,7 +858,6 @@ export function App() {
           )}
         </div>
 
-        {/* Mobile drawings panel */}
         {showDrawings && (
           <div
             className="flex flex-col gap-3 p-4 md:hidden overflow-y-auto"
@@ -787,35 +889,46 @@ export function App() {
                   setShowDrawings(false);
                 }}
               >
+                {d.dataUrl && (
+                  <img
+                    src={d.dataUrl}
+                    alt=""
+                    style={{
+                      width: "2.5rem",
+                      height: "1.75rem",
+                      objectFit: "cover",
+                      borderRadius: "0.25rem",
+                      border: "1px solid",
+                      borderColor: d.id === activeId ? "rgba(255,255,255,0.3)" : "var(--color-line)",
+                      flexShrink: 0,
+                    }}
+                  />
+                )}
                 <span className="flex-1 truncate" style={{ fontSize: "0.875rem" }}>{d.name}</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteDrawing(d.id);
-                  }}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    cursor: "pointer",
-                    color: "inherit",
-                    opacity: 0.6,
-                    fontSize: "1rem",
-                    padding: "0 0.25rem",
-                  }}
-                >
-                  ×
-                </button>
+                {drawings.length > 1 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteDrawing(d.id);
+                    }}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      color: "inherit",
+                      opacity: 0.6,
+                      fontSize: "1rem",
+                      padding: "0 0.25rem",
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             ))}
-            {drawings.length === 0 && (
-              <div style={{ fontSize: "0.8125rem", color: "var(--color-muted)", textAlign: "center", padding: "1rem 0" }}>
-                No saved drawings yet
-              </div>
-            )}
           </div>
         )}
 
-        {/* Canvas */}
         <div
           ref={containerRef}
           className="flex-1 min-h-0 min-w-0 relative"
@@ -831,7 +944,7 @@ export function App() {
               position: "absolute",
               inset: 0,
               touchAction: "none",
-              cursor: eraser ? "crosshair" : "default",
+              cursor,
             }}
           />
         </div>
