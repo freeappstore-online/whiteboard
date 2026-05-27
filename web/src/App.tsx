@@ -63,8 +63,19 @@ function loadDrawings(): Drawing[] {
   }
 }
 
-function saveDrawings(drawings: Drawing[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(drawings));
+function saveDrawings(drawings: Drawing[]): { ok: true } | { ok: false; error: string } {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(drawings));
+    return { ok: true };
+  } catch (e) {
+    const quota = e instanceof DOMException && (e.name === "QuotaExceededError" || e.code === 22);
+    return {
+      ok: false,
+      error: quota
+        ? "Storage full. Delete a board or remove pasted images to keep auto-saving."
+        : "Could not save to local storage.",
+    };
+  }
 }
 
 function initDrawings(): { drawings: Drawing[]; activeId: string } {
@@ -146,6 +157,13 @@ export function App() {
   // UI
   const [showGrid, setShowGrid] = useState(true);
   const [darkMode, setDarkMode] = useState<"auto" | "light" | "dark">("auto");
+  const [storageError, setStorageError] = useState<string | null>(null);
+
+  const persistDrawings = useCallback((next: Drawing[]) => {
+    const result = saveDrawings(next);
+    if (result.ok) setStorageError(null);
+    else setStorageError(result.error);
+  }, []);
 
   // Selection box state
   const [selectionBox, setSelectionBox] = useState<Rect | null>(null);
@@ -284,10 +302,10 @@ export function App() {
           ? { ...d, elements: elementsRef.current, camera: cameraRef.current, thumbnail, updatedAt: Date.now() }
           : d,
       );
-      saveDrawings(next);
+      persistDrawings(next);
       return next;
     });
-  }, [activeId]);
+  }, [activeId, persistDrawings]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -340,14 +358,14 @@ export function App() {
     };
     const next = [drawing, ...drawings];
     setDrawings(next);
-    saveDrawings(next);
+    persistDrawings(next);
     setActiveId(id);
     setElements([]);
     setCamera({ x: -100, y: -100, zoom: 1 });
     setUndoStack([]);
     setRedoStack([]);
     setSelectedIds(new Set());
-  }, [persistCurrentDrawing, drawings]);
+  }, [persistCurrentDrawing, drawings, persistDrawings]);
 
   const handleSwitchDrawing = useCallback((id: string) => {
     if (id === activeId) return;
@@ -368,17 +386,17 @@ export function App() {
     const next = drawings.filter((d) => d.id !== id);
     if (next.length === 0) return;
     setDrawings(next);
-    saveDrawings(next);
+    persistDrawings(next);
     if (activeId === id && next[0]) handleSwitchDrawing(next[0].id);
-  }, [activeId, drawings, handleSwitchDrawing]);
+  }, [activeId, drawings, handleSwitchDrawing, persistDrawings]);
 
   const handleRenameDrawing = useCallback((id: string, name: string) => {
     const trimmed = name.trim() || "Untitled";
     const next = drawings.map((d) => (d.id === id ? { ...d, name: trimmed } : d));
     setDrawings(next);
-    saveDrawings(next);
+    persistDrawings(next);
     setEditingId(null);
-  }, [drawings]);
+  }, [drawings, persistDrawings]);
 
   const handleClear = useCallback(() => {
     pushUndo();
@@ -1664,6 +1682,21 @@ export function App() {
         {/* Canvas */}
         <div ref={containerRef} className="flex-1 min-h-0 min-w-0 relative"
           style={{ display: showDrawings ? "none" : undefined }}>
+          {storageError && (
+            <div role="alert"
+              style={{
+                position: "absolute", top: "0.75rem", left: "50%", transform: "translateX(-50%)",
+                zIndex: 20, padding: "0.5rem 0.875rem", borderRadius: "var(--radius-btn)",
+                background: "#dc2626", color: "#fff", fontSize: "0.8125rem",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.15)", maxWidth: "90%",
+                display: "flex", alignItems: "center", gap: "0.75rem",
+              }}>
+              <span>{storageError}</span>
+              <button onClick={() => setStorageError(null)}
+                style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", fontSize: "1rem", padding: 0, lineHeight: 1, opacity: 0.8 }}
+                title="Dismiss">×</button>
+            </div>
+          )}
           <canvas ref={canvasRef}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
