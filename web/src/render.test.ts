@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { getElementBounds, hitTest } from "./render";
-import { screenToWorld, clampZoom } from "./App";
+import { getElementBounds, hitTest, boxSelect } from "./render";
+import { screenToWorld, clampZoom } from "./lib/camera";
 import type { SceneElement, Point } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -68,15 +68,15 @@ describe("clampZoom", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getElementBounds — path
+// getElementBounds -- path
 // ---------------------------------------------------------------------------
 
-describe("getElementBounds — path", () => {
+describe("getElementBounds -- path", () => {
   it("computes bounds from multiple points", () => {
     const el: SceneElement = {
       id: "1", type: "path",
       points: [{ x: 10, y: 20 }, { x: 30, y: 40 }, { x: 20, y: 10 }],
-      color: "#000", strokeWidth: 4, eraser: false,
+      color: "#000", strokeWidth: 4, opacity: 1, eraser: false,
     };
     const b = getElementBounds(el);
     expect(b.x).toBe(8);
@@ -89,7 +89,7 @@ describe("getElementBounds — path", () => {
     const el: SceneElement = {
       id: "sp", type: "path",
       points: [{ x: 50, y: 50 }],
-      color: "#000", strokeWidth: 6, eraser: false,
+      color: "#000", strokeWidth: 6, opacity: 1, eraser: false,
     };
     const b = getElementBounds(el);
     expect(b.x).toBe(47);
@@ -101,7 +101,7 @@ describe("getElementBounds — path", () => {
   it("handles empty path", () => {
     const el: SceneElement = {
       id: "ep", type: "path",
-      points: [], color: "#000", strokeWidth: 2, eraser: false,
+      points: [], color: "#000", strokeWidth: 2, opacity: 1, eraser: false,
     };
     const b = getElementBounds(el);
     expect(b.width).toBe(0);
@@ -112,7 +112,7 @@ describe("getElementBounds — path", () => {
     const pen: SceneElement = {
       id: "p1", type: "path",
       points: [{ x: 0, y: 0 }, { x: 100, y: 100 }],
-      color: "#000", strokeWidth: 4, eraser: false,
+      color: "#000", strokeWidth: 4, opacity: 1, eraser: false,
     };
     const eraser: SceneElement = { ...pen, id: "p2", eraser: true };
     expect(getElementBounds(pen)).toEqual(getElementBounds(eraser));
@@ -120,15 +120,15 @@ describe("getElementBounds — path", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getElementBounds — line
+// getElementBounds -- line
 // ---------------------------------------------------------------------------
 
-describe("getElementBounds — line", () => {
+describe("getElementBounds -- line", () => {
   it("computes bounds for diagonal line", () => {
     const el: SceneElement = {
       id: "l1", type: "line",
       start: { x: 10, y: 20 }, end: { x: 50, y: 60 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1,
     };
     const b = getElementBounds(el);
     expect(b.x).toBe(9);
@@ -141,7 +141,7 @@ describe("getElementBounds — line", () => {
     const el: SceneElement = {
       id: "l2", type: "line",
       start: { x: 100, y: 100 }, end: { x: 20, y: 30 },
-      color: "#000", strokeWidth: 4,
+      color: "#000", strokeWidth: 4, opacity: 1,
     };
     const b = getElementBounds(el);
     expect(b.x).toBe(18);
@@ -154,7 +154,7 @@ describe("getElementBounds — line", () => {
     const el: SceneElement = {
       id: "l3", type: "line",
       start: { x: 0, y: 50 }, end: { x: 100, y: 50 },
-      color: "#000", strokeWidth: 6,
+      color: "#000", strokeWidth: 6, opacity: 1,
     };
     const b = getElementBounds(el);
     expect(b.height).toBe(6);
@@ -163,15 +163,15 @@ describe("getElementBounds — line", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getElementBounds — arrow
+// getElementBounds -- arrow
 // ---------------------------------------------------------------------------
 
-describe("getElementBounds — arrow", () => {
+describe("getElementBounds -- arrow", () => {
   it("includes arrowhead padding", () => {
     const el: SceneElement = {
       id: "a1", type: "arrow",
       start: { x: 10, y: 10 }, end: { x: 110, y: 10 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1,
     };
     const b = getElementBounds(el);
     const headLen = Math.max(2 * 3, 12);
@@ -180,7 +180,7 @@ describe("getElementBounds — arrow", () => {
   });
 
   it("arrow bounds are larger than equivalent line bounds", () => {
-    const base = { id: "x", start: { x: 0, y: 0 }, end: { x: 50, y: 50 }, color: "#000", strokeWidth: 2 };
+    const base = { id: "x", start: { x: 0, y: 0 }, end: { x: 50, y: 50 }, color: "#000", strokeWidth: 2, opacity: 1 };
     const line: SceneElement = { ...base, type: "line" as const };
     const arrow: SceneElement = { ...base, type: "arrow" as const };
     const lb = getElementBounds(line);
@@ -191,15 +191,15 @@ describe("getElementBounds — arrow", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getElementBounds — rect / ellipse
+// getElementBounds -- rect / ellipse
 // ---------------------------------------------------------------------------
 
-describe("getElementBounds — rect", () => {
+describe("getElementBounds -- rect", () => {
   it("computes bounds with stroke padding", () => {
     const el: SceneElement = {
       id: "r1", type: "rect",
       start: { x: 10, y: 20 }, end: { x: 50, y: 60 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1, filled: false,
     };
     const b = getElementBounds(el);
     expect(b.x).toBe(9);
@@ -212,7 +212,7 @@ describe("getElementBounds — rect", () => {
     const el: SceneElement = {
       id: "r2", type: "rect",
       start: { x: 100, y: 100 }, end: { x: 20, y: 30 },
-      color: "#000", strokeWidth: 4,
+      color: "#000", strokeWidth: 4, opacity: 1, filled: false,
     };
     const b = getElementBounds(el);
     expect(b.x).toBe(18);
@@ -220,9 +220,9 @@ describe("getElementBounds — rect", () => {
   });
 });
 
-describe("getElementBounds — ellipse", () => {
+describe("getElementBounds -- ellipse", () => {
   it("bounds match rect for same start/end", () => {
-    const base = { id: "e1", start: { x: 10, y: 20 }, end: { x: 110, y: 80 }, color: "#000", strokeWidth: 2 };
+    const base = { id: "e1", start: { x: 10, y: 20 }, end: { x: 110, y: 80 }, color: "#000", strokeWidth: 2, opacity: 1, filled: false };
     const rect: SceneElement = { ...base, type: "rect" as const };
     const ellipse: SceneElement = { ...base, type: "ellipse" as const };
     expect(getElementBounds(ellipse)).toEqual(getElementBounds(rect));
@@ -230,14 +230,15 @@ describe("getElementBounds — ellipse", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getElementBounds — text
+// getElementBounds -- text
 // ---------------------------------------------------------------------------
 
-describe("getElementBounds — text", () => {
+describe("getElementBounds -- text", () => {
   it("single line text", () => {
     const el: SceneElement = {
       id: "t1", type: "text",
       pos: { x: 50, y: 60 }, text: "hello", color: "#000", fontSize: 20,
+      bold: false, italic: false,
     };
     const b = getElementBounds(el);
     expect(b.x).toBe(50);
@@ -250,9 +251,10 @@ describe("getElementBounds — text", () => {
     const el: SceneElement = {
       id: "t2", type: "text",
       pos: { x: 0, y: 0 }, text: "hi\nworld\nok", color: "#000", fontSize: 20,
+      bold: false, italic: false,
     };
     const b = getElementBounds(el);
-    expect(b.width).toBe(5 * 20 * 0.55); // "world" is longest (5 chars)
+    expect(b.width).toBe(5 * 20 * 0.55);
     expect(b.height).toBe(20 * 1.3 * 3);
   });
 
@@ -260,6 +262,7 @@ describe("getElementBounds — text", () => {
     const el: SceneElement = {
       id: "t3", type: "text",
       pos: { x: 10, y: 10 }, text: "", color: "#000", fontSize: 16,
+      bold: false, italic: false,
     };
     const b = getElementBounds(el);
     expect(b.width).toBe(0);
@@ -268,10 +271,10 @@ describe("getElementBounds — text", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getElementBounds — sticky / image
+// getElementBounds -- sticky / image
 // ---------------------------------------------------------------------------
 
-describe("getElementBounds — sticky", () => {
+describe("getElementBounds -- sticky", () => {
   it("returns exact position and dimensions", () => {
     const el: SceneElement = {
       id: "s1", type: "sticky",
@@ -282,7 +285,7 @@ describe("getElementBounds — sticky", () => {
   });
 });
 
-describe("getElementBounds — image", () => {
+describe("getElementBounds -- image", () => {
   it("returns exact dimensions when set", () => {
     const el: SceneElement = {
       id: "i1", type: "image",
@@ -317,7 +320,7 @@ describe("hitTest", () => {
   const rect: SceneElement = {
     id: "r1", type: "rect",
     start: { x: 300, y: 300 }, end: { x: 400, y: 400 },
-    color: "#000", strokeWidth: 2,
+    color: "#000", strokeWidth: 2, opacity: 1, filled: false,
   };
   const elements = [sticky, rect];
 
@@ -360,7 +363,7 @@ describe("hitTest", () => {
     const path: SceneElement = {
       id: "p1", type: "path",
       points: [{ x: 10, y: 10 }, { x: 50, y: 50 }],
-      color: "#000", strokeWidth: 4, eraser: false,
+      color: "#000", strokeWidth: 4, opacity: 1, eraser: false,
     };
     expect(hitTest([path], 30, 30)?.id).toBe("p1");
     expect(hitTest([path], 0, 0)).toBeNull();
@@ -370,7 +373,7 @@ describe("hitTest", () => {
     const arrow: SceneElement = {
       id: "a1", type: "arrow",
       start: { x: 100, y: 100 }, end: { x: 200, y: 100 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1,
     };
     const headLen = Math.max(2 * 3, 12);
     expect(hitTest([arrow], 100 - headLen + 1, 100)?.id).toBe("a1");
@@ -380,6 +383,7 @@ describe("hitTest", () => {
     const text: SceneElement = {
       id: "t1", type: "text",
       pos: { x: 50, y: 50 }, text: "hello", color: "#000", fontSize: 20,
+      bold: false, italic: false,
     };
     expect(hitTest([text], 55, 55)?.id).toBe("t1");
   });
@@ -398,11 +402,50 @@ describe("hitTest", () => {
     const el: SceneElement = {
       id: "e0", type: "ellipse",
       start: { x: 50, y: 50 }, end: { x: 50, y: 50 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1, filled: false,
     };
     const b = getElementBounds(el);
     expect(b.width).toBe(2);
     expect(b.height).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// boxSelect
+// ---------------------------------------------------------------------------
+
+describe("boxSelect", () => {
+  const s1: SceneElement = {
+    id: "s1", type: "sticky",
+    pos: { x: 10, y: 10 }, width: 50, height: 50,
+    text: "", color: "#fef3c7",
+  };
+  const s2: SceneElement = {
+    id: "s2", type: "sticky",
+    pos: { x: 200, y: 200 }, width: 50, height: 50,
+    text: "", color: "#dbeafe",
+  };
+
+  it("selects elements within the rect", () => {
+    const ids = boxSelect([s1, s2], { x: 0, y: 0, width: 100, height: 100 });
+    expect(ids).toContain("s1");
+    expect(ids).not.toContain("s2");
+  });
+
+  it("selects both when rect covers all", () => {
+    const ids = boxSelect([s1, s2], { x: 0, y: 0, width: 300, height: 300 });
+    expect(ids).toContain("s1");
+    expect(ids).toContain("s2");
+  });
+
+  it("returns empty for no intersection", () => {
+    const ids = boxSelect([s1, s2], { x: 500, y: 500, width: 10, height: 10 });
+    expect(ids).toHaveLength(0);
+  });
+
+  it("partial overlap counts as selected", () => {
+    const ids = boxSelect([s1], { x: 50, y: 50, width: 100, height: 100 });
+    expect(ids).toContain("s1");
   });
 });
 
@@ -425,7 +468,7 @@ describe("zero-size shape detection", () => {
     const el: SceneElement = {
       id: "z1", type: "line",
       start: { x: 50, y: 50 }, end: { x: 50, y: 50 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1,
     };
     expect(isZeroSizeShape(el)).toBe(true);
   });
@@ -434,7 +477,7 @@ describe("zero-size shape detection", () => {
     const el: SceneElement = {
       id: "z2", type: "rect",
       start: { x: 10, y: 10 }, end: { x: 10, y: 10 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1, filled: false,
     };
     expect(isZeroSizeShape(el)).toBe(true);
   });
@@ -443,7 +486,7 @@ describe("zero-size shape detection", () => {
     const el: SceneElement = {
       id: "z3", type: "arrow",
       start: { x: 0, y: 0 }, end: { x: 0, y: 0 },
-      color: "#000", strokeWidth: 4,
+      color: "#000", strokeWidth: 4, opacity: 1,
     };
     expect(isZeroSizeShape(el)).toBe(true);
   });
@@ -452,7 +495,7 @@ describe("zero-size shape detection", () => {
     const el: SceneElement = {
       id: "z4", type: "path",
       points: [{ x: 5, y: 5 }],
-      color: "#000", strokeWidth: 2, eraser: false,
+      color: "#000", strokeWidth: 2, opacity: 1, eraser: false,
     };
     expect(isZeroSizeShape(el)).toBe(true);
   });
@@ -461,7 +504,7 @@ describe("zero-size shape detection", () => {
     const el: SceneElement = {
       id: "nz1", type: "line",
       start: { x: 0, y: 0 }, end: { x: 10, y: 10 },
-      color: "#000", strokeWidth: 2,
+      color: "#000", strokeWidth: 2, opacity: 1,
     };
     expect(isZeroSizeShape(el)).toBe(false);
   });
@@ -470,7 +513,7 @@ describe("zero-size shape detection", () => {
     const el: SceneElement = {
       id: "nz2", type: "path",
       points: [{ x: 0, y: 0 }, { x: 10, y: 10 }],
-      color: "#000", strokeWidth: 2, eraser: false,
+      color: "#000", strokeWidth: 2, opacity: 1, eraser: false,
     };
     expect(isZeroSizeShape(el)).toBe(false);
   });
@@ -488,20 +531,22 @@ describe("zero-size shape detection", () => {
     const el: SceneElement = {
       id: "nz4", type: "text",
       pos: { x: 0, y: 0 }, text: "hi", color: "#000", fontSize: 16,
+      bold: false, italic: false,
     };
     expect(isZeroSizeShape(el)).toBe(false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// getElementBounds — additional edge cases
+// getElementBounds -- additional edge cases
 // ---------------------------------------------------------------------------
 
-describe("getElementBounds — edge cases", () => {
+describe("getElementBounds -- edge cases", () => {
   it("text with only newlines has zero width", () => {
     const el: SceneElement = {
       id: "enl", type: "text",
       pos: { x: 0, y: 0 }, text: "\n\n", color: "#000", fontSize: 20,
+      bold: false, italic: false,
     };
     const b = getElementBounds(el);
     expect(b.width).toBe(0);
@@ -512,7 +557,7 @@ describe("getElementBounds — edge cases", () => {
     const el: SceneElement = {
       id: "lz", type: "line",
       start: { x: 50, y: 50 }, end: { x: 50, y: 50 },
-      color: "#000", strokeWidth: 4,
+      color: "#000", strokeWidth: 4, opacity: 1,
     };
     const b = getElementBounds(el);
     expect(b.width).toBe(4);
@@ -523,7 +568,7 @@ describe("getElementBounds — edge cases", () => {
     const thin: SceneElement = {
       id: "at", type: "arrow",
       start: { x: 0, y: 0 }, end: { x: 100, y: 0 },
-      color: "#000", strokeWidth: 1,
+      color: "#000", strokeWidth: 1, opacity: 1,
     };
     const thick: SceneElement = { ...thin, id: "at2", strokeWidth: 10 };
     const bt = getElementBounds(thin);

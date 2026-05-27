@@ -11,9 +11,11 @@
     ]
   },
   "scripts": {
-    "dev": "pnpm --filter @freewhiteboardapp/web dev",
-    "build": "pnpm --filter @freewhiteboardapp/web build",
-    "test": "pnpm --filter @freewhiteboardapp/web test"
+    "dev": "pnpm --filter @whiteboard/web dev",
+    "build": "pnpm --filter @whiteboard/web build",
+    "preview": "pnpm --filter @whiteboard/web preview",
+    "typecheck": "pnpm --filter @whiteboard/web exec tsc -b",
+    "test": "pnpm --filter @whiteboard/web test"
   },
   "repository": {
     "type": "git",

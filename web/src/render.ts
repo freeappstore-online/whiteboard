@@ -58,6 +58,23 @@ export function hitTest(elements: SceneElement[], wx: number, wy: number): Scene
   return null;
 }
 
+/** Returns IDs of all elements whose bounds intersect the given world-space rect. */
+export function boxSelect(elements: SceneElement[], rect: Rect): string[] {
+  const ids: string[] = [];
+  for (const el of elements) {
+    const b = getElementBounds(el);
+    if (
+      b.x + b.width >= rect.x &&
+      b.x <= rect.x + rect.width &&
+      b.y + b.height >= rect.y &&
+      b.y <= rect.y + rect.height
+    ) {
+      ids.push(el.id);
+    }
+  }
+  return ids;
+}
+
 function renderElement(
   ctx: CanvasRenderingContext2D,
   el: SceneElement,
@@ -67,6 +84,8 @@ function renderElement(
   switch (el.type) {
     case "path": {
       if (el.points.length === 0) return;
+      ctx.save();
+      ctx.globalAlpha = el.opacity;
       ctx.beginPath();
       ctx.strokeStyle = el.eraser ? paperColor : el.color;
       ctx.lineWidth = el.strokeWidth;
@@ -87,9 +106,12 @@ function renderElement(
         ctx.lineTo(pts[pts.length - 1]!.x, pts[pts.length - 1]!.y);
       }
       ctx.stroke();
+      ctx.restore();
       return;
     }
     case "line": {
+      ctx.save();
+      ctx.globalAlpha = el.opacity;
       ctx.beginPath();
       ctx.strokeStyle = el.color;
       ctx.lineWidth = el.strokeWidth;
@@ -97,9 +119,12 @@ function renderElement(
       ctx.moveTo(el.start.x, el.start.y);
       ctx.lineTo(el.end.x, el.end.y);
       ctx.stroke();
+      ctx.restore();
       return;
     }
     case "arrow": {
+      ctx.save();
+      ctx.globalAlpha = el.opacity;
       ctx.beginPath();
       ctx.strokeStyle = el.color;
       ctx.lineWidth = el.strokeWidth;
@@ -116,16 +141,25 @@ function renderElement(
       ctx.moveTo(el.end.x, el.end.y);
       ctx.lineTo(el.end.x - headLen * Math.cos(angle + Math.PI / 6), el.end.y - headLen * Math.sin(angle + Math.PI / 6));
       ctx.stroke();
+      ctx.restore();
       return;
     }
     case "rect": {
+      ctx.save();
+      ctx.globalAlpha = el.opacity;
       ctx.beginPath();
-      ctx.strokeStyle = el.color;
       ctx.lineWidth = el.strokeWidth;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.rect(el.start.x, el.start.y, el.end.x - el.start.x, el.end.y - el.start.y);
-      ctx.stroke();
+      if (el.filled) {
+        ctx.fillStyle = el.color;
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = el.color;
+        ctx.stroke();
+      }
+      ctx.restore();
       return;
     }
     case "ellipse": {
@@ -134,15 +168,25 @@ function renderElement(
       const rx = Math.abs(el.end.x - el.start.x) / 2;
       const ry = Math.abs(el.end.y - el.start.y) / 2;
       if (rx <= 0 || ry <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = el.opacity;
       ctx.beginPath();
-      ctx.strokeStyle = el.color;
       ctx.lineWidth = el.strokeWidth;
       ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-      ctx.stroke();
+      if (el.filled) {
+        ctx.fillStyle = el.color;
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = el.color;
+        ctx.stroke();
+      }
+      ctx.restore();
       return;
     }
     case "text": {
-      ctx.font = `${el.fontSize}px Manrope, system-ui, sans-serif`;
+      const weight = el.bold ? "bold" : "normal";
+      const style = el.italic ? "italic" : "normal";
+      ctx.font = `${style} ${weight} ${el.fontSize}px Manrope, system-ui, sans-serif`;
       ctx.fillStyle = el.color;
       ctx.textBaseline = "top";
       const lines = el.text.split("\n");
@@ -293,6 +337,132 @@ export function floodFill(
   ctx.putImageData(imageData, 0, 0);
 }
 
+function drawSelectionHandles(
+  ctx: CanvasRenderingContext2D,
+  b: Rect,
+  camera: Camera,
+  accentColor: string,
+) {
+  const pad = 4 / camera.zoom;
+  const handleSize = 6 / camera.zoom;
+  const dashLen = 5 / camera.zoom;
+
+  // Dashed outline
+  ctx.strokeStyle = accentColor;
+  ctx.lineWidth = 1.5 / camera.zoom;
+  ctx.setLineDash([dashLen, dashLen]);
+  ctx.strokeRect(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2);
+  ctx.setLineDash([]);
+
+  // Corner handles
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = accentColor;
+  ctx.lineWidth = 1.5 / camera.zoom;
+  const corners = [
+    { x: b.x - pad - handleSize / 2, y: b.y - pad - handleSize / 2 },
+    { x: b.x + b.width + pad - handleSize / 2, y: b.y - pad - handleSize / 2 },
+    { x: b.x - pad - handleSize / 2, y: b.y + b.height + pad - handleSize / 2 },
+    { x: b.x + b.width + pad - handleSize / 2, y: b.y + b.height + pad - handleSize / 2 },
+  ];
+  for (const c of corners) {
+    ctx.fillRect(c.x, c.y, handleSize, handleSize);
+    ctx.strokeRect(c.x, c.y, handleSize, handleSize);
+  }
+}
+
+/** Compute the bounding rect of all elements (world-space). Returns null if empty. */
+export function getSceneBounds(elements: SceneElement[]): Rect | null {
+  if (elements.length === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const el of elements) {
+    const b = getElementBounds(el);
+    if (b.x < minX) minX = b.x;
+    if (b.y < minY) minY = b.y;
+    if (b.x + b.width > maxX) maxX = b.x + b.width;
+    if (b.y + b.height > maxY) maxY = b.y + b.height;
+  }
+  if (!isFinite(minX)) return null;
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+export function renderMinimap(
+  ctx: CanvasRenderingContext2D,
+  elements: SceneElement[],
+  camera: Camera,
+  viewW: number,
+  viewH: number,
+  dpr: number,
+  paperColor: string,
+  accentColor: string,
+) {
+  const sceneBounds = getSceneBounds(elements);
+  if (!sceneBounds) return;
+
+  // Expand scene bounds to also include current viewport
+  const vpLeft = camera.x;
+  const vpTop = camera.y;
+  const vpRight = camera.x + viewW / camera.zoom;
+  const vpBottom = camera.y + viewH / camera.zoom;
+
+  const allMinX = Math.min(sceneBounds.x, vpLeft);
+  const allMinY = Math.min(sceneBounds.y, vpTop);
+  const allMaxX = Math.max(sceneBounds.x + sceneBounds.width, vpRight);
+  const allMaxY = Math.max(sceneBounds.y + sceneBounds.height, vpBottom);
+  const allW = allMaxX - allMinX;
+  const allH = allMaxY - allMinY;
+  if (allW <= 0 || allH <= 0) return;
+
+  // Minimap dimensions in screen pixels
+  const mmW = 150;
+  const mmH = 100;
+  const mmPad = 12;
+  const mmX = (viewW - mmW - mmPad) * dpr;
+  const mmY = (viewH - mmH - mmPad) * dpr;
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // Background
+  ctx.fillStyle = paperColor;
+  ctx.globalAlpha = 0.85;
+  ctx.fillRect(mmX, mmY, mmW * dpr, mmH * dpr);
+  ctx.globalAlpha = 1;
+
+  // Border
+  ctx.strokeStyle = accentColor;
+  ctx.lineWidth = 1 * dpr;
+  ctx.strokeRect(mmX, mmY, mmW * dpr, mmH * dpr);
+
+  // Scale to fit all content in minimap
+  const scale = Math.min((mmW * dpr) / allW, (mmH * dpr) / allH) * 0.9;
+  const offsetX = mmX + (mmW * dpr - allW * scale) / 2;
+  const offsetY = mmY + (mmH * dpr - allH * scale) / 2;
+
+  // Draw element dots/rects
+  ctx.fillStyle = accentColor;
+  ctx.globalAlpha = 0.5;
+  for (const el of elements) {
+    const b = getElementBounds(el);
+    const rx = offsetX + (b.x - allMinX) * scale;
+    const ry = offsetY + (b.y - allMinY) * scale;
+    const rw = Math.max(b.width * scale, 2);
+    const rh = Math.max(b.height * scale, 2);
+    ctx.fillRect(rx, ry, rw, rh);
+  }
+  ctx.globalAlpha = 1;
+
+  // Viewport rectangle
+  const vx = offsetX + (vpLeft - allMinX) * scale;
+  const vy = offsetY + (vpTop - allMinY) * scale;
+  const vw = (vpRight - vpLeft) * scale;
+  const vh = (vpBottom - vpTop) * scale;
+  ctx.strokeStyle = accentColor;
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeRect(vx, vy, vw, vh);
+
+  ctx.restore();
+}
+
 export function renderScene(
   ctx: CanvasRenderingContext2D,
   canvasW: number,
@@ -304,8 +474,9 @@ export function renderScene(
   dpr: number,
   imageCache: Map<string, HTMLImageElement>,
   inProgress?: SceneElement | null,
-  selectedId?: string | null,
+  selectedIds?: ReadonlySet<string> | string | null,
   accentColor?: string,
+  selectionBox?: Rect | null,
 ) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -330,19 +501,68 @@ export function renderScene(
     renderElement(ctx, inProgress, paperColor, imageCache);
   }
 
-  if (selectedId && accentColor) {
-    const sel = elements.find((e) => e.id === selectedId);
-    if (sel) {
-      const b = getElementBounds(sel);
-      const pad = 4 / camera.zoom;
-      const dashLen = 5 / camera.zoom;
-      ctx.strokeStyle = accentColor;
-      ctx.lineWidth = 1.5 / camera.zoom;
-      ctx.setLineDash([dashLen, dashLen]);
-      ctx.strokeRect(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2);
-      ctx.setLineDash([]);
+  // Draw selection boxes and handles
+  if (selectedIds && accentColor) {
+    const ids = typeof selectedIds === "string" ? new Set([selectedIds]) : selectedIds;
+    for (const el of elements) {
+      if (ids.has(el.id)) {
+        const b = getElementBounds(el);
+        drawSelectionHandles(ctx, b, camera, accentColor);
+      }
     }
   }
 
+  // Draw selection box (drag-select rectangle)
+  if (selectionBox && accentColor) {
+    ctx.fillStyle = accentColor;
+    ctx.globalAlpha = 0.08;
+    ctx.fillRect(selectionBox.x, selectionBox.y, selectionBox.width, selectionBox.height);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1 / camera.zoom;
+    ctx.setLineDash([4 / camera.zoom, 4 / camera.zoom]);
+    ctx.strokeRect(selectionBox.x, selectionBox.y, selectionBox.width, selectionBox.height);
+    ctx.setLineDash([]);
+  }
+
   ctx.restore();
+
+  // Mini-map
+  if (elements.length > 0 && accentColor) {
+    renderMinimap(ctx, elements, camera, viewW, viewH, dpr, paperColor, accentColor);
+  }
+}
+
+/** Render the full board to an offscreen canvas and return it as a data URL. */
+export function exportFullBoard(
+  elements: SceneElement[],
+  paperColor: string,
+  imageCache: Map<string, HTMLImageElement>,
+  padding = 40,
+): string | null {
+  const bounds = getSceneBounds(elements);
+  if (!bounds) return null;
+
+  const w = Math.ceil(bounds.width + padding * 2);
+  const h = Math.ceil(bounds.height + padding * 2);
+  const offscreen = document.createElement("canvas");
+  offscreen.width = w;
+  offscreen.height = h;
+  const ctx = offscreen.getContext("2d")!;
+
+  ctx.fillStyle = paperColor;
+  ctx.fillRect(0, 0, w, h);
+
+  const camera: Camera = {
+    x: bounds.x - padding,
+    y: bounds.y - padding,
+    zoom: 1,
+  };
+  ctx.setTransform(1, 0, 0, 1, -camera.x, -camera.y);
+
+  for (const el of elements) {
+    renderElement(ctx, el, paperColor, imageCache);
+  }
+
+  return offscreen.toDataURL("image/png");
 }

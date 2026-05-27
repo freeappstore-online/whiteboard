@@ -15,6 +15,7 @@ export interface PathElement {
   points: Point[];
   color: string;
   strokeWidth: number;
+  opacity: number;
   eraser: boolean;
 }
 
@@ -25,6 +26,7 @@ export interface LineElement {
   end: Point;
   color: string;
   strokeWidth: number;
+  opacity: number;
 }
 
 export interface ArrowElement {
@@ -34,6 +36,7 @@ export interface ArrowElement {
   end: Point;
   color: string;
   strokeWidth: number;
+  opacity: number;
 }
 
 export interface RectElement {
@@ -43,6 +46,8 @@ export interface RectElement {
   end: Point;
   color: string;
   strokeWidth: number;
+  opacity: number;
+  filled: boolean;
 }
 
 export interface EllipseElement {
@@ -52,6 +57,8 @@ export interface EllipseElement {
   end: Point;
   color: string;
   strokeWidth: number;
+  opacity: number;
+  filled: boolean;
 }
 
 export interface TextElement {
@@ -61,6 +68,8 @@ export interface TextElement {
   text: string;
   color: string;
   fontSize: number;
+  bold: boolean;
+  italic: boolean;
 }
 
 export interface StickyElement {

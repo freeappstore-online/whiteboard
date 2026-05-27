@@ -6,40 +6,41 @@ import {
   useCallback,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { SceneElement, Camera, Drawing, Tool, Point } from "./types";
-import { renderScene, hitTest, getElementBounds, floodFill } from "./render";
+import type { SceneElement, Camera, Drawing, Tool, Point, Rect } from "./types";
+import { renderScene, hitTest, getElementBounds, floodFill, boxSelect, exportFullBoard } from "./render";
+import { screenToWorld, clampZoom } from "./lib/camera";
 
 const PRESET_COLORS = [
-  "#1a1a1a",
-  "#dc2626",
-  "#ea580c",
-  "#eab308",
-  "#16a34a",
-  "#2563eb",
-  "#7c3aed",
-  "#ec4899",
+  "#1a1a1a", // black
+  "#ffffff", // white
+  "#dc2626", // red
+  "#2563eb", // blue
+  "#16a34a", // green
+  "#ea580c", // orange
+  "#7c3aed", // purple
+  "#eab308", // yellow
 ];
 
 const STICKY_COLORS = [
-  "#fef3c7",
-  "#fce7f3",
-  "#dbeafe",
-  "#dcfce7",
-  "#f3e8ff",
-  "#ffedd5",
+  "#fef3c7", // yellow
+  "#fce7f3", // pink
+  "#dbeafe", // blue
+  "#dcfce7", // green
 ];
 
-const MAX_HISTORY = 30;
+const BRUSH_WIDTHS = [
+  { label: "Thin", value: 2 },
+  { label: "Medium", value: 5 },
+  { label: "Thick", value: 10 },
+];
+
+const MAX_HISTORY = 50;
 const STORAGE_KEY = "whiteboard_drawings_v2";
 const SHAPE_TOOLS: Tool[] = ["line", "arrow", "rect", "ellipse"];
-const MIN_ZOOM = 0.1;
-const MAX_ZOOM = 5;
-
 function loadDrawings(): Drawing[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
-    // Migrate from old format
     const old = localStorage.getItem("whiteboard_drawings");
     if (old) {
       const oldDrawings = JSON.parse(old) as Array<{ id: string; name: string; dataUrl: string; updatedAt: number }>;
@@ -81,12 +82,10 @@ function getCssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-export function screenToWorld(sx: number, sy: number, camera: Camera): Point {
-  return { x: sx / camera.zoom + camera.x, y: sy / camera.zoom + camera.y };
-}
-
-export function clampZoom(z: number): number {
-  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
+function normalizeRect(p1: Point, p2: Point): Rect {
+  const x = Math.min(p1.x, p2.x);
+  const y = Math.min(p1.y, p2.y);
+  return { x, y, width: Math.abs(p2.x - p1.x), height: Math.abs(p2.y - p1.y) };
 }
 
 export function App() {
@@ -104,10 +103,14 @@ export function App() {
   // Tool state
   const [tool, setTool] = useState<Tool>("pen");
   const [color, setColor] = useState("#1a1a1a");
-  const [brushSize, setBrushSize] = useState(4);
+  const [brushSize, setBrushSize] = useState(5);
+  const [opacity, setOpacity] = useState(1);
   const [fontSize, setFontSize] = useState(20);
+  const [bold, setBold] = useState(false);
+  const [italic, setItalic] = useState(false);
+  const [filled, setFilled] = useState(false);
   const [stickyColor, setStickyColor] = useState(STICKY_COLORS[0]!);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Text/sticky editing
   const [textEditing, setTextEditing] = useState<Point | null>(null);
@@ -127,6 +130,9 @@ export function App() {
   const [showGrid, setShowGrid] = useState(true);
   const [darkMode, setDarkMode] = useState<"auto" | "light" | "dark">("auto");
 
+  // Selection box state
+  const [selectionBox, setSelectionBox] = useState<Rect | null>(null);
+
   // Refs for rendering and interaction
   const inProgressRef = useRef<SceneElement | null>(null);
   const isPanningRef = useRef(false);
@@ -139,6 +145,11 @@ export function App() {
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>());
   const activePtrsRef = useRef(new Map<number, Point>());
   const pinchRef = useRef<{ dist: number; midX: number; midY: number; cam: Camera } | null>(null);
+  const selBoxStartRef = useRef<Point | null>(null);
+  const isResizingRef = useRef(false);
+  const resizeCornerRef = useRef<string | null>(null);
+  const resizeOrigBoundsRef = useRef<Rect | null>(null);
+  const resizeOrigElementRef = useRef<SceneElement | null>(null);
 
   // Keep refs in sync for render function
   const elementsRef = useRef(elements);
@@ -147,14 +158,18 @@ export function App() {
   cameraRef.current = camera;
   const showGridRef = useRef(showGrid);
   showGridRef.current = showGrid;
-  const selectedIdRef = useRef(selectedId);
-  selectedIdRef.current = selectedId;
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
   const toolRef = useRef(tool);
   toolRef.current = tool;
   const colorRef = useRef(color);
   colorRef.current = color;
   const brushSizeRef = useRef(brushSize);
   brushSizeRef.current = brushSize;
+  const opacityRef = useRef(opacity);
+  opacityRef.current = opacity;
+  const selectionBoxRef = useRef(selectionBox);
+  selectionBoxRef.current = selectionBox;
 
   // -- Dark mode --
   useEffect(() => {
@@ -191,15 +206,16 @@ export function App() {
       paperColor, showGridRef.current, dpr,
       imageCacheRef.current,
       inProgressRef.current,
-      selectedIdRef.current,
+      selectedIdsRef.current.size > 0 ? selectedIdsRef.current : null,
       accentColor,
+      selectionBoxRef.current,
     );
   }, []);
 
   // Re-render when state changes
   useEffect(() => {
     renderToCanvas();
-  }, [elements, camera, showGrid, selectedId, darkMode, renderToCanvas]);
+  }, [elements, camera, showGrid, selectedIds, darkMode, selectionBox, renderToCanvas]);
 
   // -- Canvas resize --
   const resizeCanvas = useCallback(() => {
@@ -305,7 +321,7 @@ export function App() {
     setCamera({ x: -100, y: -100, zoom: 1 });
     setUndoStack([]);
     setRedoStack([]);
-    setSelectedId(null);
+    setSelectedIds(new Set());
   }, [persistCurrentDrawing, drawings]);
 
   const handleSwitchDrawing = useCallback((id: string) => {
@@ -314,7 +330,7 @@ export function App() {
     setActiveId(id);
     setUndoStack([]);
     setRedoStack([]);
-    setSelectedId(null);
+    setSelectedIds(new Set());
     const drawing = drawings.find((d) => d.id === id);
     if (drawing) {
       setElements(drawing.elements);
@@ -342,7 +358,7 @@ export function App() {
   const handleClear = useCallback(() => {
     pushUndo();
     setElements([]);
-    setSelectedId(null);
+    setSelectedIds(new Set());
     setTimeout(persistCurrentDrawing, 0);
   }, [pushUndo, persistCurrentDrawing]);
 
@@ -374,59 +390,89 @@ export function App() {
     setCamera({ x: cx, y: cy, zoom });
   }, []);
 
+  const deleteSelected = useCallback(() => {
+    const ids = selectedIdsRef.current;
+    if (ids.size === 0) return;
+    pushUndo();
+    setElements((prev) => prev.filter((el) => !ids.has(el.id)));
+    setSelectedIds(new Set());
+  }, [pushUndo]);
+
   const duplicateSelected = useCallback(() => {
-    const sid = selectedIdRef.current;
-    if (!sid) return;
-    const el = elementsRef.current.find((e) => e.id === sid);
-    if (!el) return;
+    const ids = selectedIdsRef.current;
+    if (ids.size === 0) return;
     pushUndo();
     const offset = 20;
-    const newId = crypto.randomUUID();
-    let clone: SceneElement;
-    if (el.type === "sticky" || el.type === "image" || el.type === "text") {
-      clone = { ...el, id: newId, pos: { x: el.pos.x + offset, y: el.pos.y + offset } };
-    } else if (el.type === "path") {
-      clone = { ...el, id: newId, points: el.points.map((p) => ({ x: p.x + offset, y: p.y + offset })) };
-    } else {
-      clone = { ...el, id: newId, start: { x: el.start.x + offset, y: el.start.y + offset }, end: { x: el.end.x + offset, y: el.end.y + offset } };
-    }
-    setElements((prev) => [...prev, clone]);
-    setSelectedId(newId);
+    const newIds = new Set<string>();
+    setElements((prev) => {
+      const clones: SceneElement[] = [];
+      for (const el of prev) {
+        if (!ids.has(el.id)) continue;
+        const newId = crypto.randomUUID();
+        newIds.add(newId);
+        if (el.type === "sticky" || el.type === "image" || el.type === "text") {
+          clones.push({ ...el, id: newId, pos: { x: el.pos.x + offset, y: el.pos.y + offset } });
+        } else if (el.type === "path") {
+          clones.push({ ...el, id: newId, points: el.points.map((p) => ({ x: p.x + offset, y: p.y + offset })) });
+        } else {
+          clones.push({ ...el, id: newId, start: { x: el.start.x + offset, y: el.start.y + offset }, end: { x: el.end.x + offset, y: el.end.y + offset } });
+        }
+      }
+      return [...prev, ...clones];
+    });
+    setSelectedIds(newIds);
   }, [pushUndo]);
 
   const bringForward = useCallback(() => {
-    const sid = selectedIdRef.current;
-    if (!sid) return;
+    const ids = selectedIdsRef.current;
+    if (ids.size === 0) return;
     pushUndo();
     setElements((prev) => {
-      const idx = prev.findIndex((e) => e.id === sid);
-      if (idx < 0 || idx >= prev.length - 1) return prev;
       const next = [...prev];
-      [next[idx], next[idx + 1]] = [next[idx + 1]!, next[idx]!];
+      for (let i = next.length - 2; i >= 0; i--) {
+        const el = next[i];
+        if (el && ids.has(el.id) && i < next.length - 1) {
+          [next[i], next[i + 1]] = [next[i + 1]!, next[i]!];
+        }
+      }
       return next;
     });
   }, [pushUndo]);
 
   const sendBackward = useCallback(() => {
-    const sid = selectedIdRef.current;
-    if (!sid) return;
+    const ids = selectedIdsRef.current;
+    if (ids.size === 0) return;
     pushUndo();
     setElements((prev) => {
-      const idx = prev.findIndex((e) => e.id === sid);
-      if (idx <= 0) return prev;
       const next = [...prev];
-      [next[idx - 1], next[idx]] = [next[idx]!, next[idx - 1]!];
+      for (let i = 1; i < next.length; i++) {
+        const el = next[i];
+        if (el && ids.has(el.id)) {
+          [next[i - 1], next[i]] = [next[i]!, next[i - 1]!];
+        }
+      }
       return next;
     });
   }, [pushUndo]);
 
-  const handleDownload = useCallback(() => {
+  const handleDownloadVisible = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const drawing = drawings.find((d) => d.id === activeId);
     const link = document.createElement("a");
-    link.download = (drawing?.name || "whiteboard") + ".png";
+    link.download = (drawing?.name || "whiteboard") + "-visible.png";
     link.href = canvas.toDataURL("image/png");
+    link.click();
+  }, [activeId, drawings]);
+
+  const handleDownloadFull = useCallback(() => {
+    const paperColor = getCssVar("--color-paper");
+    const dataUrl = exportFullBoard(elementsRef.current, paperColor, imageCacheRef.current);
+    if (!dataUrl) return;
+    const drawing = drawings.find((d) => d.id === activeId);
+    const link = document.createElement("a");
+    link.download = (drawing?.name || "whiteboard") + "-full.png";
+    link.href = dataUrl;
     link.click();
   }, [activeId, drawings]);
 
@@ -442,11 +488,12 @@ export function App() {
       id: crypto.randomUUID(), type: "text",
       pos: textEditing, text: textValue.trim(),
       color: colorRef.current, fontSize,
+      bold, italic,
     };
     setElements((prev) => [...prev, el]);
     setTextEditing(null);
     setTextValue("");
-  }, [textEditing, textValue, fontSize, pushUndo]);
+  }, [textEditing, textValue, fontSize, bold, italic, pushUndo]);
 
   // -- Sticky commit --
   const commitSticky = useCallback(() => {
@@ -479,6 +526,32 @@ export function App() {
     }
   }, [renderToCanvas]);
 
+  // -- Resize handle hit test --
+  const hitResizeHandle = useCallback((screenX: number, screenY: number): { elementId: string; corner: string } | null => {
+    const cam = cameraRef.current;
+    const ids = selectedIdsRef.current;
+    if (ids.size !== 1) return null;
+    const id = [...ids][0]!;
+    const el = elementsRef.current.find((e) => e.id === id);
+    if (!el) return null;
+    const b = getElementBounds(el);
+    const pad = 4 / cam.zoom;
+    const handleSize = 8 / cam.zoom;
+    const corners = [
+      { name: "nw", x: b.x - pad, y: b.y - pad },
+      { name: "ne", x: b.x + b.width + pad, y: b.y - pad },
+      { name: "sw", x: b.x - pad, y: b.y + b.height + pad },
+      { name: "se", x: b.x + b.width + pad, y: b.y + b.height + pad },
+    ];
+    const worldPos = screenToWorld(screenX, screenY, cam);
+    for (const c of corners) {
+      if (Math.abs(worldPos.x - c.x) <= handleSize && Math.abs(worldPos.y - c.y) <= handleSize) {
+        return { elementId: id, corner: c.name };
+      }
+    }
+    return null;
+  }, []);
+
   // -- Pointer handlers --
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
     e.preventDefault();
@@ -489,7 +562,7 @@ export function App() {
     // Track active pointers for multi-touch
     activePtrsRef.current.set(e.pointerId, screenPos);
 
-    // Two-finger pinch/pan — cancel any drawing, enter pinch mode
+    // Two-finger pinch/pan
     if (activePtrsRef.current.size >= 2) {
       cancelDrawing();
       isDraggingRef.current = false;
@@ -522,16 +595,43 @@ export function App() {
 
     // Select tool
     if (currentTool === "select") {
+      // Check resize handle first
+      const resizeHit = hitResizeHandle(screenPos.x, screenPos.y);
+      if (resizeHit) {
+        isResizingRef.current = true;
+        resizeCornerRef.current = resizeHit.corner;
+        const el = elementsRef.current.find((e2) => e2.id === resizeHit.elementId);
+        if (el) {
+          resizeOrigBoundsRef.current = getElementBounds(el);
+          resizeOrigElementRef.current = el;
+        }
+        pushUndo();
+        canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+
       const hit = hitTest(elementsRef.current, worldPos.x, worldPos.y);
       if (hit) {
-        setSelectedId(hit.id);
+        const currentIds = selectedIdsRef.current;
+        if (e.shiftKey && currentIds.size > 0) {
+          // Shift-click: toggle in multi-selection
+          const next = new Set(currentIds);
+          if (next.has(hit.id)) next.delete(hit.id);
+          else next.add(hit.id);
+          setSelectedIds(next);
+        } else if (!currentIds.has(hit.id)) {
+          setSelectedIds(new Set([hit.id]));
+        }
         isDraggingRef.current = true;
-        const b = getElementBounds(hit);
-        dragOffsetRef.current = { x: worldPos.x - b.x, y: worldPos.y - b.y };
+        const b2 = getElementBounds(hit);
+        dragOffsetRef.current = { x: worldPos.x - b2.x, y: worldPos.y - b2.y };
         pushUndo();
         canvas.setPointerCapture(e.pointerId);
       } else {
-        setSelectedId(null);
+        // Start selection box
+        setSelectedIds(new Set());
+        selBoxStartRef.current = worldPos;
+        canvas.setPointerCapture(e.pointerId);
       }
       return;
     }
@@ -544,7 +644,7 @@ export function App() {
       return;
     }
 
-    // Fill tool — renders scene to offscreen canvas, flood fills, flattens to image
+    // Fill tool
     if (currentTool === "fill") {
       const displayCanvas = canvasRef.current;
       if (!displayCanvas) return;
@@ -592,6 +692,19 @@ export function App() {
       return;
     }
 
+    // Eraser tool - delete objects on click
+    if (currentTool === "eraser") {
+      const hit = hitTest(elementsRef.current, worldPos.x, worldPos.y);
+      if (hit) {
+        pushUndo();
+        setElements((prev) => prev.filter((el) => el.id !== hit.id));
+      }
+      canvas.setPointerCapture(e.pointerId);
+      isDrawingRef.current = true;
+      inProgressRef.current = null;
+      return;
+    }
+
     // Drawing tools
     canvas.setPointerCapture(e.pointerId);
     pushUndo();
@@ -600,28 +713,29 @@ export function App() {
     if (SHAPE_TOOLS.includes(currentTool)) {
       shapeStartRef.current = worldPos;
       const shapeEl: SceneElement = (() => {
-        const base = { id: crypto.randomUUID(), start: worldPos, end: worldPos, color: colorRef.current, strokeWidth: brushSizeRef.current };
+        const base = { id: crypto.randomUUID(), start: worldPos, end: worldPos, color: colorRef.current, strokeWidth: brushSizeRef.current, opacity: opacityRef.current };
         switch (currentTool) {
           case "line": return { ...base, type: "line" as const };
           case "arrow": return { ...base, type: "arrow" as const };
-          case "rect": return { ...base, type: "rect" as const };
-          case "ellipse": return { ...base, type: "ellipse" as const };
+          case "rect": return { ...base, type: "rect" as const, filled };
+          case "ellipse": return { ...base, type: "ellipse" as const, filled };
           default: return { ...base, type: "line" as const };
         }
       })();
       inProgressRef.current = shapeEl;
     } else {
-      // Pen or eraser
+      // Pen
       const pathEl: SceneElement = {
         id: crypto.randomUUID(), type: "path",
         points: [worldPos], color: colorRef.current,
         strokeWidth: brushSizeRef.current,
-        eraser: currentTool === "eraser",
+        opacity: opacityRef.current,
+        eraser: false,
       };
       inProgressRef.current = pathEl;
     }
     renderToCanvas();
-  }, [getCanvasPos, pushUndo, commitText, textEditing, stickyColor, renderToCanvas]);
+  }, [getCanvasPos, pushUndo, commitText, textEditing, stickyColor, renderToCanvas, cancelDrawing, hitResizeHandle, filled, persistCurrentDrawing]);
 
   const onPointerMove = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
     const screenPos = getCanvasPos(e);
@@ -657,17 +771,75 @@ export function App() {
       return;
     }
 
-    if (isDraggingRef.current && selectedIdRef.current) {
+    // Resize handle drag
+    if (isResizingRef.current && resizeOrigBoundsRef.current && resizeOrigElementRef.current && resizeCornerRef.current) {
       const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
+      const origB = resizeOrigBoundsRef.current;
+      const el = resizeOrigElementRef.current;
+      const corner = resizeCornerRef.current;
+
+      let newX = origB.x;
+      let newY = origB.y;
+      let newW = origB.width;
+      let newH = origB.height;
+
+      if (corner === "se") {
+        newW = Math.max(10, worldPos.x - origB.x);
+        newH = Math.max(10, worldPos.y - origB.y);
+      } else if (corner === "sw") {
+        newX = Math.min(worldPos.x, origB.x + origB.width - 10);
+        newW = origB.x + origB.width - newX;
+        newH = Math.max(10, worldPos.y - origB.y);
+      } else if (corner === "ne") {
+        newW = Math.max(10, worldPos.x - origB.x);
+        newY = Math.min(worldPos.y, origB.y + origB.height - 10);
+        newH = origB.y + origB.height - newY;
+      } else if (corner === "nw") {
+        newX = Math.min(worldPos.x, origB.x + origB.width - 10);
+        newY = Math.min(worldPos.y, origB.y + origB.height - 10);
+        newW = origB.x + origB.width - newX;
+        newH = origB.y + origB.height - newY;
+      }
+
+      setElements((prev) =>
+        prev.map((prevEl) => {
+          if (prevEl.id !== el.id) return prevEl;
+          if (prevEl.type === "sticky" || prevEl.type === "image") {
+            return { ...prevEl, pos: { x: newX, y: newY }, width: newW, height: newH };
+          }
+          if (prevEl.type === "rect" || prevEl.type === "ellipse") {
+            return { ...prevEl, start: { x: newX, y: newY }, end: { x: newX + newW, y: newY + newH } };
+          }
+          return prevEl;
+        }),
+      );
+      return;
+    }
+
+    // Selection box
+    if (selBoxStartRef.current && toolRef.current === "select") {
+      const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
+      const box = normalizeRect(selBoxStartRef.current, worldPos);
+      setSelectionBox(box);
+      return;
+    }
+
+    if (isDraggingRef.current && selectedIdsRef.current.size > 0) {
+      const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
+      // For multi-select dragging, we use the first selected element as anchor
+      const firstId = [...selectedIdsRef.current][0]!;
+      const firstEl = elementsRef.current.find((el2) => el2.id === firstId);
+      if (!firstEl) return;
+      const firstB = getElementBounds(firstEl);
       const targetX = worldPos.x - dragOffsetRef.current.x;
       const targetY = worldPos.y - dragOffsetRef.current.y;
+      const dx = targetX - firstB.x;
+      const dy = targetY - firstB.y;
+      if (dx === 0 && dy === 0) return;
+
       setElements((prev) =>
         prev.map((el) => {
-          if (el.id !== selectedIdRef.current) return el;
-          const b = getElementBounds(el);
-          const dx = targetX - b.x;
-          const dy = targetY - b.y;
-          if (dx === 0 && dy === 0) return el;
+          if (!selectedIdsRef.current.has(el.id)) return el;
           if (el.type === "sticky" || el.type === "image" || el.type === "text") {
             return { ...el, pos: { x: el.pos.x + dx, y: el.pos.y + dy } };
           }
@@ -680,6 +852,16 @@ export function App() {
           return el;
         }),
       );
+      return;
+    }
+
+    // Eraser tool: delete objects while dragging
+    if (isDrawingRef.current && toolRef.current === "eraser") {
+      const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
+      const hit = hitTest(elementsRef.current, worldPos.x, worldPos.y);
+      if (hit) {
+        setElements((prev) => prev.filter((el) => el.id !== hit.id));
+      }
       return;
     }
 
@@ -704,7 +886,6 @@ export function App() {
     if (activePtrsRef.current.size < 2) {
       pinchRef.current = null;
     }
-    // If there are still pointers active from a pinch, don't process as single-pointer up
     if (activePtrsRef.current.size > 0 && !isDrawingRef.current && !isDraggingRef.current && !isPanningRef.current) {
       return;
     }
@@ -716,8 +897,38 @@ export function App() {
       return;
     }
 
+    // Resize end
+    if (isResizingRef.current) {
+      isResizingRef.current = false;
+      resizeCornerRef.current = null;
+      resizeOrigBoundsRef.current = null;
+      resizeOrigElementRef.current = null;
+      persistCurrentDrawing();
+      return;
+    }
+
+    // Selection box end
+    if (selBoxStartRef.current) {
+      const worldPos = screenToWorld(getCanvasPos(e).x, getCanvasPos(e).y, cameraRef.current);
+      const box = normalizeRect(selBoxStartRef.current, worldPos);
+      if (box.width > 2 || box.height > 2) {
+        const ids = boxSelect(elementsRef.current, box);
+        setSelectedIds(new Set(ids));
+      }
+      selBoxStartRef.current = null;
+      setSelectionBox(null);
+      return;
+    }
+
     if (isDraggingRef.current) {
       isDraggingRef.current = false;
+      persistCurrentDrawing();
+      return;
+    }
+
+    // Eraser tool
+    if (isDrawingRef.current && toolRef.current === "eraser") {
+      isDrawingRef.current = false;
       persistCurrentDrawing();
       return;
     }
@@ -733,13 +944,12 @@ export function App() {
       (ip as { end: Point }).end = worldPos;
     }
 
-    // Discard zero-size shapes (click without drag)
+    // Discard zero-size shapes
     const discard =
       ("start" in ip && ip.start.x === (ip as { end: Point }).end.x && ip.start.y === (ip as { end: Point }).end.y) ||
       (ip.type === "path" && ip.points.length <= 1);
 
     if (discard) {
-      // Pop the undo entry we pushed on pointer down
       setUndoStack((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev));
       inProgressRef.current = null;
       isDrawingRef.current = false;
@@ -768,7 +978,6 @@ export function App() {
       const cam = cameraRef.current;
 
       if (e.ctrlKey || e.metaKey) {
-        // Zoom
         const delta = -e.deltaY * 0.01;
         const newZoom = clampZoom(cam.zoom * (1 + delta));
         const worldBefore = screenToWorld(sx, sy, cam);
@@ -777,7 +986,6 @@ export function App() {
         newCam.y = worldBefore.y - sy / newZoom;
         setCamera(newCam);
       } else {
-        // Pan
         setCamera({
           ...cam,
           x: cam.x + e.deltaX / cam.zoom,
@@ -802,6 +1010,11 @@ export function App() {
         if (e.shiftKey) handleRedo(); else handleUndo();
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        persistCurrentDrawing();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "d") {
         e.preventDefault();
         duplicateSelected();
@@ -818,20 +1031,34 @@ export function App() {
         return;
       }
       if (e.key === "Escape") {
-        setSelectedId(null);
+        setSelectedIds(new Set());
         return;
       }
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedIdRef.current) {
-          pushUndo();
-          setElements((prev) => prev.filter((el) => el.id !== selectedIdRef.current));
-          setSelectedId(null);
-        }
+        deleteSelected();
         return;
       }
 
       if (e.key === "]") { bringForward(); return; }
       if (e.key === "[") { sendBackward(); return; }
+
+      // Zoom +/-
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        setCamera((cam) => {
+          const newZoom = clampZoom(cam.zoom * 1.2);
+          return { ...cam, zoom: newZoom };
+        });
+        return;
+      }
+      if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        setCamera((cam) => {
+          const newZoom = clampZoom(cam.zoom / 1.2);
+          return { ...cam, zoom: newZoom };
+        });
+        return;
+      }
 
       const shortcuts: Record<string, Tool> = {
         v: "select", p: "pen", e: "eraser", l: "line", a: "arrow",
@@ -839,7 +1066,7 @@ export function App() {
       };
       if (!e.metaKey && !e.ctrlKey && shortcuts[e.key]) {
         setTool(shortcuts[e.key]!);
-        setSelectedId(null);
+        setSelectedIds(new Set());
       }
     };
     const up = (e: KeyboardEvent) => {
@@ -848,7 +1075,7 @@ export function App() {
     window.addEventListener("keydown", handler);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", handler); window.removeEventListener("keyup", up); };
-  }, [handleUndo, handleRedo, pushUndo, duplicateSelected, zoomToFit, bringForward, sendBackward, textEditing, stickyEditing, editingId]);
+  }, [handleUndo, handleRedo, pushUndo, duplicateSelected, zoomToFit, bringForward, sendBackward, deleteSelected, persistCurrentDrawing, textEditing, stickyEditing, editingId]);
 
   // -- Image paste --
   useEffect(() => {
@@ -871,17 +1098,16 @@ export function App() {
             let h = img.naturalHeight;
             const maxDim = 800;
             if (w > maxDim || h > maxDim) {
-              const scale = maxDim / Math.max(w, h);
-              w = Math.round(w * scale);
-              h = Math.round(h * scale);
+              const sc = maxDim / Math.max(w, h);
+              w = Math.round(w * sc);
+              h = Math.round(h * sc);
             }
-            // Resize if needed
-            const resizeCanvas = document.createElement("canvas");
-            resizeCanvas.width = w;
-            resizeCanvas.height = h;
-            const rCtx = resizeCanvas.getContext("2d")!;
+            const resizeCanvasEl = document.createElement("canvas");
+            resizeCanvasEl.width = w;
+            resizeCanvasEl.height = h;
+            const rCtx = resizeCanvasEl.getContext("2d")!;
             rCtx.drawImage(img, 0, 0, w, h);
-            const resizedUrl = resizeCanvas.toDataURL("image/png", 0.85);
+            const resizedUrl = resizeCanvasEl.toDataURL("image/png", 0.85);
 
             const cam = cameraRef.current;
             const canvasEl = canvasRef.current;
@@ -927,17 +1153,17 @@ export function App() {
   // -- Cursor --
   const getCursor = (): string => {
     if (spaceHeldRef.current || isPanningRef.current) return "grab";
-    if (tool === "select") return selectedId ? "move" : "default";
+    if (tool === "select") return selectedIds.size > 0 ? "move" : "default";
     if (tool === "text") return "text";
     if (tool === "fill") return "crosshair";
     if (tool === "sticky") return "crosshair";
+    if (tool === "eraser") return "crosshair";
     if (SHAPE_TOOLS.includes(tool)) return "crosshair";
-    if (tool === "eraser" || tool === "pen") {
+    if (tool === "pen") {
       const r = Math.max(brushSize / 2, 1.5);
       const svgSize = Math.ceil(r * 2 + 4);
       const center = svgSize / 2;
-      const stroke = tool === "eraser" ? "%23999" : "%23333";
-      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${svgSize}' height='${svgSize}'><circle cx='${center}' cy='${center}' r='${r}' fill='none' stroke='${stroke}' stroke-width='1.5'/></svg>`;
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${svgSize}' height='${svgSize}'><circle cx='${center}' cy='${center}' r='${r}' fill='none' stroke='%23333' stroke-width='1.5'/></svg>`;
       return `url("data:image/svg+xml,${svg}") ${center} ${center}, crosshair`;
     }
     return "default";
@@ -959,7 +1185,7 @@ export function App() {
   };
 
   const toolBtn = (t: Tool, label: string, shortcut: string) => (
-    <button key={t} onClick={() => { setTool(t); setSelectedId(null); }}
+    <button key={t} onClick={() => { setTool(t); setSelectedIds(new Set()); }}
       style={tool === t ? activeBtnStyle : btnStyle} title={`${label} (${shortcut.toUpperCase()})`}>
       {label}
     </button>
@@ -971,7 +1197,7 @@ export function App() {
     <>
       {/* Drawings */}
       <div>
-        <div style={labelStyle}>Drawings</div>
+        <div style={labelStyle}>Boards</div>
         <button onClick={handleNewDrawing} style={{ ...btnStyle, width: "100%", marginBottom: "0.5rem" }}>
           + New
         </button>
@@ -1004,54 +1230,13 @@ export function App() {
               {drawings.length > 1 && (
                 <button onClick={(ev) => { ev.stopPropagation(); handleDeleteDrawing(d.id); }} title="Delete"
                   style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", opacity: 0.6, fontSize: "0.75rem", padding: "0 0.25rem", lineHeight: 1, flexShrink: 0 }}>
-                  ×
+                  x
                 </button>
               )}
             </div>
           ))}
         </div>
       </div>
-
-      {/* Color */}
-      <div>
-        <div style={labelStyle}>Color</div>
-        <div className="flex flex-wrap gap-1.5">
-          {PRESET_COLORS.map((c) => (
-            <button key={c} onClick={() => { setColor(c); if (tool === "eraser") setTool("pen"); }} title={c}
-              style={{ width: "1.75rem", height: "1.75rem", borderRadius: "var(--radius-btn)", background: c, cursor: "pointer", padding: 0, boxSizing: "border-box", border: color === c && tool !== "eraser" ? "2.5px solid var(--color-accent)" : "2px solid var(--color-line)" }} />
-          ))}
-          <label title="Custom color" style={{ width: "1.75rem", height: "1.75rem", borderRadius: "var(--radius-btn)", border: "2px dashed var(--color-line)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.75rem", color: "var(--color-muted)", position: "relative", overflow: "hidden" }}>
-            +
-            <input type="color" value={color} onChange={(e) => { setColor(e.target.value); if (tool === "eraser") setTool("pen"); }}
-              style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer" }} />
-          </label>
-        </div>
-      </div>
-
-      {/* Brush / Font size */}
-      <div>
-        <div style={labelStyle}>{tool === "text" ? `Font: ${fontSize}px` : `Brush: ${brushSize}px`}</div>
-        {tool === "text" ? (
-          <input type="range" min={10} max={72} value={fontSize} onChange={(e) => setFontSize(Number(e.target.value))}
-            style={{ width: "100%", accentColor: "var(--color-accent)" }} />
-        ) : (
-          <input type="range" min={1} max={20} value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))}
-            style={{ width: "100%", accentColor: "var(--color-accent)" }} />
-        )}
-      </div>
-
-      {/* Sticky colors */}
-      {tool === "sticky" && (
-        <div>
-          <div style={labelStyle}>Sticky Color</div>
-          <div className="flex flex-wrap gap-1.5">
-            {STICKY_COLORS.map((c) => (
-              <button key={c} onClick={() => setStickyColor(c)}
-                style={{ width: "1.75rem", height: "1.75rem", borderRadius: "var(--radius-btn)", background: c, cursor: "pointer", padding: 0, border: stickyColor === c ? "2.5px solid var(--color-accent)" : "2px solid var(--color-line)" }} />
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Tools */}
       <div>
@@ -1070,6 +1255,75 @@ export function App() {
         </div>
       </div>
 
+      {/* Color */}
+      <div>
+        <div style={labelStyle}>Color</div>
+        <div className="flex flex-wrap gap-1.5">
+          {PRESET_COLORS.map((c) => (
+            <button key={c} onClick={() => { setColor(c); }} title={c}
+              style={{ width: "1.75rem", height: "1.75rem", borderRadius: "var(--radius-btn)", background: c, cursor: "pointer", padding: 0, boxSizing: "border-box", border: color === c ? "2.5px solid var(--color-accent)" : c === "#ffffff" ? "2px solid var(--color-line)" : "2px solid var(--color-line)" }} />
+          ))}
+          <label title="Custom color" style={{ width: "1.75rem", height: "1.75rem", borderRadius: "var(--radius-btn)", border: "2px dashed var(--color-line)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.75rem", color: "var(--color-muted)", position: "relative", overflow: "hidden" }}>
+            +
+            <input type="color" value={color} onChange={(e) => { setColor(e.target.value); }}
+              style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer" }} />
+          </label>
+        </div>
+      </div>
+
+      {/* Pen settings */}
+      {(tool === "pen" || SHAPE_TOOLS.includes(tool)) && (
+        <div>
+          <div style={labelStyle}>Width</div>
+          <div className="flex gap-1.5">
+            {BRUSH_WIDTHS.map((bw) => (
+              <button key={bw.value} onClick={() => setBrushSize(bw.value)}
+                style={brushSize === bw.value ? activeBtnStyle : btnStyle}>
+                {bw.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ ...labelStyle, marginTop: "0.5rem" }}>Opacity: {Math.round(opacity * 100)}%</div>
+          <input type="range" min={10} max={100} value={Math.round(opacity * 100)}
+            onChange={(e) => setOpacity(Number(e.target.value) / 100)}
+            style={{ width: "100%", accentColor: "var(--color-accent)" }} />
+        </div>
+      )}
+
+      {/* Shape fill toggle */}
+      {(tool === "rect" || tool === "ellipse") && (
+        <div className="flex gap-1.5">
+          <button onClick={() => setFilled(false)} style={!filled ? activeBtnStyle : btnStyle}>Outline</button>
+          <button onClick={() => setFilled(true)} style={filled ? activeBtnStyle : btnStyle}>Filled</button>
+        </div>
+      )}
+
+      {/* Text settings */}
+      {tool === "text" && (
+        <div>
+          <div style={labelStyle}>Font: {fontSize}px</div>
+          <input type="range" min={10} max={72} value={fontSize} onChange={(e) => setFontSize(Number(e.target.value))}
+            style={{ width: "100%", accentColor: "var(--color-accent)" }} />
+          <div className="flex gap-1.5 mt-2">
+            <button onClick={() => setBold(!bold)} style={bold ? activeBtnStyle : btnStyle}>Bold</button>
+            <button onClick={() => setItalic(!italic)} style={italic ? activeBtnStyle : btnStyle}>Italic</button>
+          </div>
+        </div>
+      )}
+
+      {/* Sticky colors */}
+      {tool === "sticky" && (
+        <div>
+          <div style={labelStyle}>Sticky Color</div>
+          <div className="flex flex-wrap gap-1.5">
+            {STICKY_COLORS.map((c) => (
+              <button key={c} onClick={() => setStickyColor(c)}
+                style={{ width: "1.75rem", height: "1.75rem", borderRadius: "var(--radius-btn)", background: c, cursor: "pointer", padding: 0, border: stickyColor === c ? "2.5px solid var(--color-accent)" : "2px solid var(--color-line)" }} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Actions */}
       <div className="flex flex-wrap gap-1.5">
         <button onClick={handleUndo} style={btnStyle} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">Undo</button>
@@ -1077,17 +1331,19 @@ export function App() {
       </div>
       <div className="flex flex-wrap gap-1.5">
         <button onClick={handleClear} style={btnStyle}>Clear</button>
-        <button onClick={handleDownload} style={btnStyle}>PNG</button>
+        <button onClick={handleDownloadVisible} style={btnStyle} title="Export visible area as PNG">PNG</button>
+        <button onClick={handleDownloadFull} style={btnStyle} title="Export full board as PNG">Full</button>
       </div>
 
       {/* Selection actions */}
-      {selectedId && (
+      {selectedIds.size > 0 && (
         <div>
-          <div style={labelStyle}>Selected</div>
+          <div style={labelStyle}>Selected ({selectedIds.size})</div>
           <div className="flex flex-wrap gap-1.5">
             <button onClick={duplicateSelected} style={btnStyle} title="Duplicate (Ctrl+D)">Dup</button>
             <button onClick={bringForward} style={btnStyle} title="Bring Forward (])">Fwd</button>
             <button onClick={sendBackward} style={btnStyle} title="Send Backward ([)">Back</button>
+            <button onClick={deleteSelected} style={btnStyle} title="Delete (Backspace)">Del</button>
           </div>
         </div>
       )}
@@ -1113,12 +1369,23 @@ export function App() {
           )}
         </div>
       </div>
+
+      {/* Shortcuts help */}
+      <div style={{ fontSize: "0.6875rem", color: "var(--color-muted)", lineHeight: 1.6 }}>
+        <div style={{ ...labelStyle, marginBottom: "0.25rem" }}>Shortcuts</div>
+        V Select, P Pen, E Eraser<br />
+        L Line, R Rect, O Ellipse<br />
+        A Arrow, T Text, S Sticky<br />
+        Space+drag Pan, +/- Zoom<br />
+        Ctrl+Z Undo, Ctrl+Shift+Z Redo<br />
+        Ctrl+S Save, Del Delete
+      </div>
     </>
   );
 
   // -- Mobile toolbar (compact) --
   const mobileToolBtn = (t: Tool, label: string) => (
-    <button key={t} onClick={() => { setTool(t); setSelectedId(null); }}
+    <button key={t} onClick={() => { setTool(t); setSelectedIds(new Set()); }}
       style={{ ...(tool === t ? activeBtnStyle : btnStyle), padding: "0.375rem 0.5rem", fontSize: "0.75rem", flexShrink: 0 }}>
       {label}
     </button>
@@ -1159,7 +1426,7 @@ export function App() {
         <div className="flex md:hidden items-center gap-2 px-3 py-2 border-b overflow-x-auto shrink-0"
           style={{ borderColor: "var(--color-line)", background: "var(--color-panel)" }}>
           <button onClick={() => setShowDrawings(!showDrawings)} style={mobileBtnStyle}>
-            {showDrawings ? "Canvas" : `Files (${drawings.length})`}
+            {showDrawings ? "Canvas" : `Boards (${drawings.length})`}
           </button>
           {!showDrawings && (
             <>
@@ -1184,7 +1451,7 @@ export function App() {
         {showDrawings && (
           <div className="flex flex-col gap-3 p-4 md:hidden overflow-y-auto" style={{ background: "var(--color-panel)" }}>
             <button onClick={() => { handleNewDrawing(); setShowDrawings(false); }} style={{ ...btnStyle, width: "100%" }}>
-              + New Drawing
+              + New Board
             </button>
             {drawings.map((d) => (
               <div key={d.id} className="flex items-center gap-2"
@@ -1203,7 +1470,7 @@ export function App() {
                 <span className="flex-1 truncate" style={{ fontSize: "0.875rem" }}>{d.name}</span>
                 {drawings.length > 1 && (
                   <button onClick={(ev) => { ev.stopPropagation(); handleDeleteDrawing(d.id); }}
-                    style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", opacity: 0.6, fontSize: "1rem", padding: "0 0.25rem" }}>×</button>
+                    style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", opacity: 0.6, fontSize: "1rem", padding: "0 0.25rem" }}>x</button>
                 )}
               </div>
             ))}
@@ -1234,6 +1501,7 @@ export function App() {
               style={{
                 position: "absolute", left: textScreenPos.left, top: textScreenPos.top,
                 fontSize: `${fontSize * camera.zoom}px`, fontFamily: "Manrope, system-ui, sans-serif",
+                fontWeight: bold ? "bold" : "normal", fontStyle: italic ? "italic" : "normal",
                 color, background: "transparent", border: "1.5px dashed var(--color-accent)",
                 borderRadius: "0.25rem", padding: "0.125rem 0.25rem", outline: "none",
                 resize: "both", minWidth: "6rem", minHeight: `${fontSize * 1.5}px`, lineHeight: 1.3, zIndex: 10,
@@ -1254,7 +1522,7 @@ export function App() {
                 width: stickyScreenPos.width, height: stickyScreenPos.height,
                 fontSize: `${14 * camera.zoom}px`, fontFamily: "Manrope, system-ui, sans-serif",
                 color: "#1a1a1a", background: (() => {
-                  const el = elementsRef.current.find(e => e.id === stickyEditing.id);
+                  const el = elementsRef.current.find(e2 => e2.id === stickyEditing.id);
                   return (el?.type === "sticky" ? el.color : null) || stickyColor;
                 })(),
                 border: "2px solid var(--color-accent)", borderRadius: `${6 * camera.zoom}px`,

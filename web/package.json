@@ -1,5 +1,5 @@
 {
-  "name": "@freewhiteboardapp/web",
+  "name": "@whiteboard/web",
   "private": true,
   "type": "module",
   "scripts": {
