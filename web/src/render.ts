@@ -216,7 +216,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, camera: Camera, viewW: number, 
   const startX = Math.floor(worldLeft / spacing) * spacing;
   const startY = Math.floor(worldTop / spacing) * spacing;
 
-  const dotSize = 1.5 / camera.zoom;
+  const dotSize = Math.min(1.5 / camera.zoom, 3);
   ctx.fillStyle = "rgba(128, 128, 128, 0.15)";
 
   for (let x = startX; x <= worldRight; x += spacing) {

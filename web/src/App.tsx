@@ -539,7 +539,7 @@ export function App() {
     if (isPanningRef.current) {
       isPanningRef.current = false;
       panStartRef.current = null;
-      canvas!.style.cursor = "";
+      if (canvas) canvas.style.cursor = "";
       return;
     }
 
@@ -553,11 +553,26 @@ export function App() {
 
     const ip = inProgressRef.current;
 
-    // Finalize shape
+    // Finalize shape endpoint
     if ("start" in ip) {
       const screenPos = getCanvasPos(e);
       const worldPos = screenToWorld(screenPos.x, screenPos.y, cameraRef.current);
       (ip as { end: Point }).end = worldPos;
+    }
+
+    // Discard zero-size shapes (click without drag)
+    const discard =
+      ("start" in ip && ip.start.x === (ip as { end: Point }).end.x && ip.start.y === (ip as { end: Point }).end.y) ||
+      (ip.type === "path" && ip.points.length <= 1);
+
+    if (discard) {
+      // Pop the undo entry we pushed on pointer down
+      setUndoStack((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev));
+      inProgressRef.current = null;
+      isDrawingRef.current = false;
+      shapeStartRef.current = null;
+      renderToCanvas();
+      return;
     }
 
     setElements((prev) => [...prev, ip]);
@@ -652,6 +667,8 @@ export function App() {
   // -- Image paste --
   useEffect(() => {
     const handler = (e: ClipboardEvent) => {
+      const active = document.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
@@ -1034,7 +1051,10 @@ export function App() {
                 position: "absolute", left: stickyScreenPos.left, top: stickyScreenPos.top,
                 width: stickyScreenPos.width, height: stickyScreenPos.height,
                 fontSize: `${14 * camera.zoom}px`, fontFamily: "Manrope, system-ui, sans-serif",
-                color: "#1a1a1a", background: stickyEditing ? (elementsRef.current.find(e => e.id === stickyEditing.id) as { color?: string } | undefined)?.color || stickyColor : "transparent",
+                color: "#1a1a1a", background: (() => {
+                  const el = elementsRef.current.find(e => e.id === stickyEditing.id);
+                  return (el?.type === "sticky" ? el.color : null) || stickyColor;
+                })(),
                 border: "2px solid var(--color-accent)", borderRadius: `${6 * camera.zoom}px`,
                 padding: `${12 * camera.zoom}px`, outline: "none", resize: "none",
                 lineHeight: 1.3, zIndex: 10,

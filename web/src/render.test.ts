@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { getElementBounds, hitTest } from "./render";
 import { screenToWorld, clampZoom } from "./App";
-import type { SceneElement } from "./types";
+import type { SceneElement, Point } from "./types";
 
 // ---------------------------------------------------------------------------
 // screenToWorld
@@ -382,5 +382,152 @@ describe("hitTest", () => {
       pos: { x: 50, y: 50 }, text: "hello", color: "#000", fontSize: 20,
     };
     expect(hitTest([text], 55, 55)?.id).toBe("t1");
+  });
+
+  it("hits image with 0 dimensions via fallback bounds", () => {
+    const img: SceneElement = {
+      id: "i0", type: "image",
+      pos: { x: 10, y: 10 }, width: 0, height: 0,
+      dataUrl: "data:image/png;base64,x",
+    };
+    expect(hitTest([img], 50, 50)?.id).toBe("i0");
+    expect(hitTest([img], 111, 50)).toBeNull();
+  });
+
+  it("does not hit ellipse with zero radius", () => {
+    const el: SceneElement = {
+      id: "e0", type: "ellipse",
+      start: { x: 50, y: 50 }, end: { x: 50, y: 50 },
+      color: "#000", strokeWidth: 2,
+    };
+    const b = getElementBounds(el);
+    expect(b.width).toBe(2);
+    expect(b.height).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Zero-size shape detection helper (mirrors App.tsx discard logic)
+// ---------------------------------------------------------------------------
+
+function isZeroSizeShape(el: SceneElement): boolean {
+  if ("start" in el) {
+    const s = el.start as Point;
+    const e = (el as { end: Point }).end;
+    return s.x === e.x && s.y === e.y;
+  }
+  if (el.type === "path") return el.points.length <= 1;
+  return false;
+}
+
+describe("zero-size shape detection", () => {
+  it("detects zero-size line", () => {
+    const el: SceneElement = {
+      id: "z1", type: "line",
+      start: { x: 50, y: 50 }, end: { x: 50, y: 50 },
+      color: "#000", strokeWidth: 2,
+    };
+    expect(isZeroSizeShape(el)).toBe(true);
+  });
+
+  it("detects zero-size rect", () => {
+    const el: SceneElement = {
+      id: "z2", type: "rect",
+      start: { x: 10, y: 10 }, end: { x: 10, y: 10 },
+      color: "#000", strokeWidth: 2,
+    };
+    expect(isZeroSizeShape(el)).toBe(true);
+  });
+
+  it("detects zero-size arrow", () => {
+    const el: SceneElement = {
+      id: "z3", type: "arrow",
+      start: { x: 0, y: 0 }, end: { x: 0, y: 0 },
+      color: "#000", strokeWidth: 4,
+    };
+    expect(isZeroSizeShape(el)).toBe(true);
+  });
+
+  it("detects single-point path as zero-size", () => {
+    const el: SceneElement = {
+      id: "z4", type: "path",
+      points: [{ x: 5, y: 5 }],
+      color: "#000", strokeWidth: 2, eraser: false,
+    };
+    expect(isZeroSizeShape(el)).toBe(true);
+  });
+
+  it("non-zero line is not detected", () => {
+    const el: SceneElement = {
+      id: "nz1", type: "line",
+      start: { x: 0, y: 0 }, end: { x: 10, y: 10 },
+      color: "#000", strokeWidth: 2,
+    };
+    expect(isZeroSizeShape(el)).toBe(false);
+  });
+
+  it("multi-point path is not detected", () => {
+    const el: SceneElement = {
+      id: "nz2", type: "path",
+      points: [{ x: 0, y: 0 }, { x: 10, y: 10 }],
+      color: "#000", strokeWidth: 2, eraser: false,
+    };
+    expect(isZeroSizeShape(el)).toBe(false);
+  });
+
+  it("sticky is never zero-size", () => {
+    const el: SceneElement = {
+      id: "nz3", type: "sticky",
+      pos: { x: 0, y: 0 }, width: 180, height: 140,
+      text: "", color: "#fef3c7",
+    };
+    expect(isZeroSizeShape(el)).toBe(false);
+  });
+
+  it("text is never zero-size", () => {
+    const el: SceneElement = {
+      id: "nz4", type: "text",
+      pos: { x: 0, y: 0 }, text: "hi", color: "#000", fontSize: 16,
+    };
+    expect(isZeroSizeShape(el)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getElementBounds — additional edge cases
+// ---------------------------------------------------------------------------
+
+describe("getElementBounds — edge cases", () => {
+  it("text with only newlines has zero width", () => {
+    const el: SceneElement = {
+      id: "enl", type: "text",
+      pos: { x: 0, y: 0 }, text: "\n\n", color: "#000", fontSize: 20,
+    };
+    const b = getElementBounds(el);
+    expect(b.width).toBe(0);
+    expect(b.height).toBe(20 * 1.3 * 3);
+  });
+
+  it("line with coincident points has minimal bounds", () => {
+    const el: SceneElement = {
+      id: "lz", type: "line",
+      start: { x: 50, y: 50 }, end: { x: 50, y: 50 },
+      color: "#000", strokeWidth: 4,
+    };
+    const b = getElementBounds(el);
+    expect(b.width).toBe(4);
+    expect(b.height).toBe(4);
+  });
+
+  it("arrow head padding scales with thick strokeWidth", () => {
+    const thin: SceneElement = {
+      id: "at", type: "arrow",
+      start: { x: 0, y: 0 }, end: { x: 100, y: 0 },
+      color: "#000", strokeWidth: 1,
+    };
+    const thick: SceneElement = { ...thin, id: "at2", strokeWidth: 10 };
+    const bt = getElementBounds(thin);
+    const bk = getElementBounds(thick);
+    expect(bk.width).toBeGreaterThan(bt.width);
   });
 });
