@@ -14,12 +14,18 @@ export function getElementBounds(el: SceneElement): Rect {
       const pad = el.strokeWidth / 2;
       return { x: minX - pad, y: minY - pad, width: maxX - minX + el.strokeWidth, height: maxY - minY + el.strokeWidth };
     }
-    case "line":
-    case "arrow": {
+    case "line": {
       const x = Math.min(el.start.x, el.end.x);
       const y = Math.min(el.start.y, el.end.y);
       const pad = el.strokeWidth / 2;
       return { x: x - pad, y: y - pad, width: Math.abs(el.end.x - el.start.x) + el.strokeWidth, height: Math.abs(el.end.y - el.start.y) + el.strokeWidth };
+    }
+    case "arrow": {
+      const headLen = Math.max(el.strokeWidth * 3, 12);
+      const x = Math.min(el.start.x, el.end.x);
+      const y = Math.min(el.start.y, el.end.y);
+      const pad = Math.max(el.strokeWidth / 2, headLen);
+      return { x: x - pad, y: y - pad, width: Math.abs(el.end.x - el.start.x) + pad * 2, height: Math.abs(el.end.y - el.start.y) + pad * 2 };
     }
     case "rect":
     case "ellipse": {
@@ -29,14 +35,15 @@ export function getElementBounds(el: SceneElement): Rect {
       return { x: x - pad, y: y - pad, width: Math.abs(el.end.x - el.start.x) + el.strokeWidth, height: Math.abs(el.end.y - el.start.y) + el.strokeWidth };
     }
     case "text": {
-      const lineCount = el.text.split("\n").length;
-      const estWidth = el.text.length * el.fontSize * 0.55;
-      return { x: el.pos.x, y: el.pos.y, width: estWidth, height: el.fontSize * 1.3 * lineCount };
+      const lines = el.text.split("\n");
+      const longest = Math.max(...lines.map((l) => l.length));
+      const estWidth = longest * el.fontSize * 0.55;
+      return { x: el.pos.x, y: el.pos.y, width: estWidth, height: el.fontSize * 1.3 * lines.length };
     }
     case "sticky":
       return { x: el.pos.x, y: el.pos.y, width: el.width, height: el.height };
     case "image":
-      return { x: el.pos.x, y: el.pos.y, width: el.width, height: el.height };
+      return { x: el.pos.x, y: el.pos.y, width: el.width || 100, height: el.height || 100 };
   }
 }
 

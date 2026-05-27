@@ -269,9 +269,10 @@ export function App() {
       const snapshot = next.pop()!;
       setRedoStack((r) => [...r, [...elementsRef.current]]);
       setElements(snapshot);
+      setTimeout(persistCurrentDrawing, 0);
       return next;
     });
-  }, []);
+  }, [persistCurrentDrawing]);
 
   const handleRedo = useCallback(() => {
     setRedoStack((prev) => {
@@ -280,9 +281,10 @@ export function App() {
       const snapshot = next.pop()!;
       setUndoStack((u) => [...u, [...elementsRef.current]]);
       setElements(snapshot);
+      setTimeout(persistCurrentDrawing, 0);
       return next;
     });
-  }, []);
+  }, [persistCurrentDrawing]);
 
   // -- Drawing management --
   const handleNewDrawing = useCallback(() => {
@@ -339,7 +341,8 @@ export function App() {
     pushUndo();
     setElements([]);
     setSelectedId(null);
-  }, [pushUndo]);
+    setTimeout(persistCurrentDrawing, 0);
+  }, [pushUndo, persistCurrentDrawing]);
 
   const handleDownload = useCallback(() => {
     const canvas = canvasRef.current;
@@ -704,6 +707,7 @@ export function App() {
 
   // -- Double-click to edit sticky --
   const onDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (toolRef.current !== "select") return;
     const screenPos = getCanvasPos(e);
     const worldPos = screenToWorld(screenPos.x, screenPos.y, cameraRef.current);
     const hit = hitTest(elementsRef.current, worldPos.x, worldPos.y);
