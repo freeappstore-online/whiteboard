@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { SceneElement, Camera, Drawing, Tool, Point } from "./types";
-import { renderScene, hitTest } from "./render";
+import { renderScene, hitTest, getElementBounds } from "./render";
 
 const PRESET_COLORS = [
   "#1a1a1a",
@@ -81,11 +81,11 @@ function getCssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-function screenToWorld(sx: number, sy: number, camera: Camera): Point {
+export function screenToWorld(sx: number, sy: number, camera: Camera): Point {
   return { x: sx / camera.zoom + camera.x, y: sy / camera.zoom + camera.y };
 }
 
-function clampZoom(z: number): number {
+export function clampZoom(z: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 }
 
@@ -416,21 +416,8 @@ export function App() {
       if (hit) {
         setSelectedId(hit.id);
         isDraggingRef.current = true;
-        const bounds = { x: 0, y: 0 };
-        if (hit.type === "sticky" || hit.type === "image") {
-          bounds.x = hit.pos.x;
-          bounds.y = hit.pos.y;
-        } else if (hit.type === "text") {
-          bounds.x = hit.pos.x;
-          bounds.y = hit.pos.y;
-        } else if (hit.type === "path") {
-          bounds.x = hit.points[0]?.x ?? 0;
-          bounds.y = hit.points[0]?.y ?? 0;
-        } else if ("start" in hit) {
-          bounds.x = hit.start.x;
-          bounds.y = hit.start.y;
-        }
-        dragOffsetRef.current = { x: worldPos.x - bounds.x, y: worldPos.y - bounds.y };
+        const b = getElementBounds(hit);
+        dragOffsetRef.current = { x: worldPos.x - b.x, y: worldPos.y - b.y };
         pushUndo();
         canvas.setPointerCapture(e.pointerId);
       } else {
@@ -506,22 +493,22 @@ export function App() {
 
     if (isDraggingRef.current && selectedIdRef.current) {
       const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
-      const newX = worldPos.x - dragOffsetRef.current.x;
-      const newY = worldPos.y - dragOffsetRef.current.y;
+      const targetX = worldPos.x - dragOffsetRef.current.x;
+      const targetY = worldPos.y - dragOffsetRef.current.y;
       setElements((prev) =>
         prev.map((el) => {
           if (el.id !== selectedIdRef.current) return el;
+          const b = getElementBounds(el);
+          const dx = targetX - b.x;
+          const dy = targetY - b.y;
+          if (dx === 0 && dy === 0) return el;
           if (el.type === "sticky" || el.type === "image" || el.type === "text") {
-            return { ...el, pos: { x: newX, y: newY } };
+            return { ...el, pos: { x: el.pos.x + dx, y: el.pos.y + dy } };
           }
           if (el.type === "path") {
-            const dx = newX - (el.points[0]?.x ?? 0);
-            const dy = newY - (el.points[0]?.y ?? 0);
             return { ...el, points: el.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
           }
           if ("start" in el) {
-            const dx = newX - el.start.x;
-            const dy = newY - el.start.y;
             return { ...el, start: { x: el.start.x + dx, y: el.start.y + dy }, end: { x: el.end.x + dx, y: el.end.y + dy } };
           }
           return el;
@@ -627,6 +614,10 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === "0") {
         e.preventDefault();
         setCamera({ x: -100, y: -100, zoom: 1 });
+        return;
+      }
+      if (e.key === "Escape") {
+        setSelectedId(null);
         return;
       }
       if (e.key === "Delete" || e.key === "Backspace") {
