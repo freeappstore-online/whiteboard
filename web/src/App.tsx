@@ -86,6 +86,15 @@ function snapPoint(p: Point, gridSize = 20): Point {
   return { x: Math.round(p.x / gridSize) * gridSize, y: Math.round(p.y / gridSize) * gridSize };
 }
 
+function constrainAngle(start: Point, end: Point): Point {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const dist = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  const snapped = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+  return { x: start.x + dist * Math.cos(snapped), y: start.y + dist * Math.sin(snapped) };
+}
+
 function normalizeRect(p1: Point, p2: Point): Rect {
   const x = Math.min(p1.x, p2.x);
   const y = Math.min(p1.y, p2.y);
@@ -461,6 +470,11 @@ export function App() {
       return next;
     });
   }, [pushUndo]);
+
+  const selectAll = useCallback(() => {
+    setSelectedIds(new Set(elementsRef.current.map((el) => el.id)));
+    setTool("select");
+  }, []);
 
   const copySelected = useCallback(() => {
     const ids = selectedIdsRef.current;
