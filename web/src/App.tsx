@@ -137,6 +137,8 @@ export function App() {
   const isDrawingRef = useRef(false);
   const shapeStartRef = useRef<Point | null>(null);
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>());
+  const activePtrsRef = useRef(new Map<number, Point>());
+  const pinchRef = useRef<{ dist: number; midX: number; midY: number; cam: Camera } | null>(null);
 
   // Keep refs in sync for render function
   const elementsRef = useRef(elements);
@@ -393,12 +395,43 @@ export function App() {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   }, []);
 
+  const cancelDrawing = useCallback(() => {
+    if (isDrawingRef.current && inProgressRef.current) {
+      setUndoStack((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev));
+      inProgressRef.current = null;
+      isDrawingRef.current = false;
+      shapeStartRef.current = null;
+      renderToCanvas();
+    }
+  }, [renderToCanvas]);
+
   // -- Pointer handlers --
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
     const screenPos = getCanvasPos(e);
+
+    // Track active pointers for multi-touch
+    activePtrsRef.current.set(e.pointerId, screenPos);
+
+    // Two-finger pinch/pan — cancel any drawing, enter pinch mode
+    if (activePtrsRef.current.size >= 2) {
+      cancelDrawing();
+      isDraggingRef.current = false;
+      isPanningRef.current = false;
+      const pts = [...activePtrsRef.current.values()];
+      const [a, b] = [pts[0]!, pts[1]!];
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      pinchRef.current = {
+        dist,
+        midX: (a.x + b.x) / 2,
+        midY: (a.y + b.y) / 2,
+        cam: { ...cameraRef.current },
+      };
+      return;
+    }
+
     const cam = cameraRef.current;
     const worldPos = screenToWorld(screenPos.x, screenPos.y, cam);
 
@@ -518,6 +551,29 @@ export function App() {
 
   const onPointerMove = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
     const screenPos = getCanvasPos(e);
+
+    // Update tracked pointer position
+    if (activePtrsRef.current.has(e.pointerId)) {
+      activePtrsRef.current.set(e.pointerId, screenPos);
+    }
+
+    // Multi-touch pinch/pan
+    if (pinchRef.current && activePtrsRef.current.size >= 2) {
+      const pts = [...activePtrsRef.current.values()];
+      const [a, b] = [pts[0]!, pts[1]!];
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      const ps = pinchRef.current;
+      const zoomRatio = dist / Math.max(ps.dist, 1);
+      const newZoom = clampZoom(ps.cam.zoom * zoomRatio);
+      const worldMid = screenToWorld(ps.midX, ps.midY, ps.cam);
+      const newCamX = worldMid.x - midX / newZoom;
+      const newCamY = worldMid.y - midY / newZoom;
+      setCamera({ x: newCamX, y: newCamY, zoom: newZoom });
+      return;
+    }
+
     const cam = cameraRef.current;
 
     if (isPanningRef.current && panStartRef.current) {
@@ -568,6 +624,16 @@ export function App() {
   const onPointerUp = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (canvas) canvas.releasePointerCapture(e.pointerId);
+
+    // Remove from tracked pointers
+    activePtrsRef.current.delete(e.pointerId);
+    if (activePtrsRef.current.size < 2) {
+      pinchRef.current = null;
+    }
+    // If there are still pointers active from a pinch, don't process as single-pointer up
+    if (activePtrsRef.current.size > 0 && !isDrawingRef.current && !isDraggingRef.current && !isPanningRef.current) {
+      return;
+    }
 
     if (isPanningRef.current) {
       isPanningRef.current = false;
