@@ -228,6 +228,64 @@ function drawGrid(ctx: CanvasRenderingContext2D, camera: Camera, viewW: number, 
   }
 }
 
+export function floodFill(
+  ctx: CanvasRenderingContext2D,
+  startX: number,
+  startY: number,
+  fillColor: string,
+  w: number,
+  h: number,
+) {
+  const sx = Math.round(startX);
+  const sy = Math.round(startY);
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
+
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+
+  const tmp = document.createElement("canvas");
+  tmp.width = 1;
+  tmp.height = 1;
+  const tc = tmp.getContext("2d")!;
+  tc.fillStyle = fillColor;
+  tc.fillRect(0, 0, 1, 1);
+  const fd = tc.getImageData(0, 0, 1, 1).data;
+
+  const si = (sy * w + sx) * 4;
+  const tr = data[si]!, tg = data[si + 1]!, tb = data[si + 2]!, ta = data[si + 3]!;
+  if (tr === fd[0] && tg === fd[1] && tb === fd[2] && ta === fd[3]) return;
+
+  const tolerance = 30;
+  const match = (i: number) =>
+    Math.abs(data[i]! - tr) <= tolerance &&
+    Math.abs(data[i + 1]! - tg) <= tolerance &&
+    Math.abs(data[i + 2]! - tb) <= tolerance &&
+    Math.abs(data[i + 3]! - ta) <= tolerance;
+
+  const stack: number[] = [sx, sy];
+  const visited = new Uint8Array(w * h);
+
+  while (stack.length > 0) {
+    const cy = stack.pop()!;
+    const cx = stack.pop()!;
+    const vi = cy * w + cx;
+    if (visited[vi]) continue;
+    const idx = vi * 4;
+    if (!match(idx)) continue;
+    visited[vi] = 1;
+    data[idx] = fd[0]!;
+    data[idx + 1] = fd[1]!;
+    data[idx + 2] = fd[2]!;
+    data[idx + 3] = fd[3]!;
+    if (cx > 0) stack.push(cx - 1, cy);
+    if (cx < w - 1) stack.push(cx + 1, cy);
+    if (cy > 0) stack.push(cx, cy - 1);
+    if (cy < h - 1) stack.push(cx, cy + 1);
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
 export function renderScene(
   ctx: CanvasRenderingContext2D,
   canvasW: number,

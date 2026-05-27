@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { SceneElement, Camera, Drawing, Tool, Point } from "./types";
-import { renderScene, hitTest, getElementBounds } from "./render";
+import { renderScene, hitTest, getElementBounds, floodFill } from "./render";
 
 const PRESET_COLORS = [
   "#1a1a1a",
@@ -437,6 +437,39 @@ export function App() {
       return;
     }
 
+    // Fill tool — renders scene to offscreen canvas, flood fills, flattens to image
+    if (currentTool === "fill") {
+      const displayCanvas = canvasRef.current;
+      if (!displayCanvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const cw = displayCanvas.width;
+      const ch = displayCanvas.height;
+      const offscreen = document.createElement("canvas");
+      offscreen.width = cw;
+      offscreen.height = ch;
+      const octx = offscreen.getContext("2d")!;
+      const paperColor = getCssVar("--color-paper");
+      renderScene(octx, cw, ch, elementsRef.current, cam, paperColor, false, dpr, imageCacheRef.current);
+      floodFill(octx, Math.round(screenPos.x * dpr), Math.round(screenPos.y * dpr), colorRef.current, cw, ch);
+      const dataUrl = offscreen.toDataURL("image/png", 0.9);
+      const viewW = cw / dpr;
+      const viewH = ch / dpr;
+      const worldX = cam.x;
+      const worldY = cam.y;
+      const worldW = viewW / cam.zoom;
+      const worldH = viewH / cam.zoom;
+      pushUndo();
+      const imageEl: SceneElement = {
+        id: crypto.randomUUID(), type: "image",
+        pos: { x: worldX, y: worldY }, width: worldW, height: worldH,
+        dataUrl,
+      };
+      imageCacheRef.current.set(dataUrl, (() => { const img = new Image(); img.src = dataUrl; return img; })());
+      setElements([imageEl]);
+      persistCurrentDrawing();
+      return;
+    }
+
     // Sticky tool
     if (currentTool === "sticky") {
       pushUndo();
@@ -649,7 +682,7 @@ export function App() {
 
       const shortcuts: Record<string, Tool> = {
         v: "select", p: "pen", e: "eraser", l: "line", a: "arrow",
-        r: "rect", o: "ellipse", t: "text", s: "sticky",
+        r: "rect", o: "ellipse", t: "text", f: "fill", s: "sticky",
       };
       if (!e.metaKey && !e.ctrlKey && shortcuts[e.key]) {
         setTool(shortcuts[e.key]!);
@@ -743,6 +776,7 @@ export function App() {
     if (spaceHeldRef.current || isPanningRef.current) return "grab";
     if (tool === "select") return selectedId ? "move" : "default";
     if (tool === "text") return "text";
+    if (tool === "fill") return "crosshair";
     if (tool === "sticky") return "crosshair";
     if (SHAPE_TOOLS.includes(tool)) return "crosshair";
     if (tool === "eraser" || tool === "pen") {
@@ -878,6 +912,7 @@ export function App() {
           {toolBtn("rect", "Rect", "r")}
           {toolBtn("ellipse", "Ellipse", "o")}
           {toolBtn("text", "Text", "t")}
+          {toolBtn("fill", "Fill", "f")}
           {toolBtn("sticky", "Sticky", "s")}
         </div>
       </div>
@@ -970,6 +1005,7 @@ export function App() {
               {mobileToolBtn("rect", "Rect")}
               {mobileToolBtn("ellipse", "Oval")}
               {mobileToolBtn("text", "Text")}
+              {mobileToolBtn("fill", "Fill")}
               {mobileToolBtn("sticky", "Note")}
               <button onClick={handleUndo} disabled={undoStack.length === 0} style={mobileBtnStyle}>Undo</button>
               <button onClick={handleRedo} disabled={redoStack.length === 0} style={mobileBtnStyle}>Redo</button>

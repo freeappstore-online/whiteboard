@@ -101,7 +101,8 @@ export type Tool =
   | "rect"
   | "ellipse"
   | "text"
-  | "sticky";
+  | "sticky"
+  | "fill";
 
 export interface Drawing {
   id: string;
