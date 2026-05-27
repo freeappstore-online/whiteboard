@@ -346,6 +346,80 @@ export function App() {
     setTimeout(persistCurrentDrawing, 0);
   }, [pushUndo, persistCurrentDrawing]);
 
+  const zoomToFit = useCallback(() => {
+    const els = elementsRef.current;
+    if (els.length === 0) {
+      setCamera({ x: -100, y: -100, zoom: 1 });
+      return;
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const el of els) {
+      const b = getElementBounds(el);
+      if (b.x < minX) minX = b.x;
+      if (b.y < minY) minY = b.y;
+      if (b.x + b.width > maxX) maxX = b.x + b.width;
+      if (b.y + b.height > maxY) maxY = b.y + b.height;
+    }
+    const canvas = canvasRef.current;
+    const dpr = window.devicePixelRatio || 1;
+    const viewW = (canvas?.width ?? 800) / dpr;
+    const viewH = (canvas?.height ?? 600) / dpr;
+    const padding = 40;
+    const contentW = maxX - minX;
+    const contentH = maxY - minY;
+    if (contentW <= 0 || contentH <= 0) return;
+    const zoom = clampZoom(Math.min((viewW - padding * 2) / contentW, (viewH - padding * 2) / contentH));
+    const cx = minX - (viewW / zoom - contentW) / 2;
+    const cy = minY - (viewH / zoom - contentH) / 2;
+    setCamera({ x: cx, y: cy, zoom });
+  }, []);
+
+  const duplicateSelected = useCallback(() => {
+    const sid = selectedIdRef.current;
+    if (!sid) return;
+    const el = elementsRef.current.find((e) => e.id === sid);
+    if (!el) return;
+    pushUndo();
+    const offset = 20;
+    const newId = crypto.randomUUID();
+    let clone: SceneElement;
+    if (el.type === "sticky" || el.type === "image" || el.type === "text") {
+      clone = { ...el, id: newId, pos: { x: el.pos.x + offset, y: el.pos.y + offset } };
+    } else if (el.type === "path") {
+      clone = { ...el, id: newId, points: el.points.map((p) => ({ x: p.x + offset, y: p.y + offset })) };
+    } else {
+      clone = { ...el, id: newId, start: { x: el.start.x + offset, y: el.start.y + offset }, end: { x: el.end.x + offset, y: el.end.y + offset } };
+    }
+    setElements((prev) => [...prev, clone]);
+    setSelectedId(newId);
+  }, [pushUndo]);
+
+  const bringForward = useCallback(() => {
+    const sid = selectedIdRef.current;
+    if (!sid) return;
+    pushUndo();
+    setElements((prev) => {
+      const idx = prev.findIndex((e) => e.id === sid);
+      if (idx < 0 || idx >= prev.length - 1) return prev;
+      const next = [...prev];
+      [next[idx], next[idx + 1]] = [next[idx + 1]!, next[idx]!];
+      return next;
+    });
+  }, [pushUndo]);
+
+  const sendBackward = useCallback(() => {
+    const sid = selectedIdRef.current;
+    if (!sid) return;
+    pushUndo();
+    setElements((prev) => {
+      const idx = prev.findIndex((e) => e.id === sid);
+      if (idx <= 0) return prev;
+      const next = [...prev];
+      [next[idx - 1], next[idx]] = [next[idx]!, next[idx - 1]!];
+      return next;
+    });
+  }, [pushUndo]);
+
   const handleDownload = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -728,9 +802,19 @@ export function App() {
         if (e.shiftKey) handleRedo(); else handleUndo();
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === "d") {
+        e.preventDefault();
+        duplicateSelected();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "0") {
         e.preventDefault();
         setCamera({ x: -100, y: -100, zoom: 1 });
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "1") {
+        e.preventDefault();
+        zoomToFit();
         return;
       }
       if (e.key === "Escape") {
@@ -745,6 +829,9 @@ export function App() {
         }
         return;
       }
+
+      if (e.key === "]") { bringForward(); return; }
+      if (e.key === "[") { sendBackward(); return; }
 
       const shortcuts: Record<string, Tool> = {
         v: "select", p: "pen", e: "eraser", l: "line", a: "arrow",
@@ -761,7 +848,7 @@ export function App() {
     window.addEventListener("keydown", handler);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", handler); window.removeEventListener("keyup", up); };
-  }, [handleUndo, handleRedo, pushUndo, textEditing, stickyEditing, editingId]);
+  }, [handleUndo, handleRedo, pushUndo, duplicateSelected, zoomToFit, bringForward, sendBackward, textEditing, stickyEditing, editingId]);
 
   // -- Image paste --
   useEffect(() => {
@@ -993,6 +1080,18 @@ export function App() {
         <button onClick={handleDownload} style={btnStyle}>PNG</button>
       </div>
 
+      {/* Selection actions */}
+      {selectedId && (
+        <div>
+          <div style={labelStyle}>Selected</div>
+          <div className="flex flex-wrap gap-1.5">
+            <button onClick={duplicateSelected} style={btnStyle} title="Duplicate (Ctrl+D)">Dup</button>
+            <button onClick={bringForward} style={btnStyle} title="Bring Forward (])">Fwd</button>
+            <button onClick={sendBackward} style={btnStyle} title="Send Backward ([)">Back</button>
+          </div>
+        </div>
+      )}
+
       {/* View */}
       <div>
         <div style={labelStyle}>View</div>
@@ -1002,6 +1101,7 @@ export function App() {
             style={btnStyle}>
             {darkMode === "dark" ? "Dark" : darkMode === "light" ? "Light" : "Auto"}
           </button>
+          <button onClick={zoomToFit} style={btnStyle} title="Zoom to Fit (Ctrl+1)">Fit</button>
         </div>
         <div style={{ fontSize: "0.75rem", color: "var(--color-muted)", marginTop: "0.5rem" }}>
           Zoom: {zoomPercent}%

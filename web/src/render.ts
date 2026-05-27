@@ -72,12 +72,19 @@ function renderElement(
       ctx.lineWidth = el.strokeWidth;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.moveTo(el.points[0]!.x, el.points[0]!.y);
-      for (let i = 1; i < el.points.length; i++) {
-        ctx.lineTo(el.points[i]!.x, el.points[i]!.y);
-      }
-      if (el.points.length === 1) {
-        ctx.lineTo(el.points[0]!.x + 0.1, el.points[0]!.y);
+      const pts = el.points;
+      ctx.moveTo(pts[0]!.x, pts[0]!.y);
+      if (pts.length === 1) {
+        ctx.lineTo(pts[0]!.x + 0.1, pts[0]!.y);
+      } else if (pts.length === 2) {
+        ctx.lineTo(pts[1]!.x, pts[1]!.y);
+      } else {
+        for (let i = 1; i < pts.length - 1; i++) {
+          const mx = (pts[i]!.x + pts[i + 1]!.x) / 2;
+          const my = (pts[i]!.y + pts[i + 1]!.y) / 2;
+          ctx.quadraticCurveTo(pts[i]!.x, pts[i]!.y, mx, my);
+        }
+        ctx.lineTo(pts[pts.length - 1]!.x, pts[pts.length - 1]!.y);
       }
       ctx.stroke();
       return;
