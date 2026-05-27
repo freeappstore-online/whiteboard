@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { SceneElement, Camera, Drawing, Tool, Point, Rect } from "./types";
-import { renderScene, hitTest, getElementBounds, floodFill, boxSelect, exportFullBoard } from "./render";
+import { renderScene, hitTest, getElementBounds, floodFill, boxSelect, exportFullBoard, exportSvg } from "./render";
 import { screenToWorld, clampZoom } from "./lib/camera";
 
 const PRESET_COLORS = [
@@ -476,6 +476,19 @@ export function App() {
     link.click();
   }, [activeId, drawings]);
 
+  const handleDownloadSvg = useCallback(() => {
+    const paperColor = getCssVar("--color-paper");
+    const svg = exportSvg(elementsRef.current, paperColor);
+    if (!svg) return;
+    const drawing = drawings.find((d) => d.id === activeId);
+    const blob = new Blob([svg], { type: "image/svg+xml" });
+    const link = document.createElement("a");
+    link.download = (drawing?.name || "whiteboard") + ".svg";
+    link.href = URL.createObjectURL(blob);
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }, [activeId, drawings]);
+
   // -- Text commit --
   const commitText = useCallback(() => {
     if (!textEditing || !textValue.trim()) {
@@ -725,9 +738,11 @@ export function App() {
       inProgressRef.current = shapeEl;
     } else {
       // Pen
+      const pressure = e.pressure > 0 ? e.pressure : 0.5;
       const pathEl: SceneElement = {
         id: crypto.randomUUID(), type: "path",
-        points: [worldPos], color: colorRef.current,
+        points: [worldPos], pressures: [pressure],
+        color: colorRef.current,
         strokeWidth: brushSizeRef.current,
         opacity: opacityRef.current,
         eraser: false,
@@ -871,6 +886,7 @@ export function App() {
 
     if (ip.type === "path") {
       ip.points.push(worldPos);
+      if (ip.pressures) ip.pressures.push(e.pressure > 0 ? e.pressure : 0.5);
     } else if ("start" in ip) {
       (ip as { end: Point }).end = worldPos;
     }
@@ -1333,6 +1349,7 @@ export function App() {
         <button onClick={handleClear} style={btnStyle}>Clear</button>
         <button onClick={handleDownloadVisible} style={btnStyle} title="Export visible area as PNG">PNG</button>
         <button onClick={handleDownloadFull} style={btnStyle} title="Export full board as PNG">Full</button>
+        <button onClick={handleDownloadSvg} style={btnStyle} title="Export as SVG (vector)">SVG</button>
       </div>
 
       {/* Selection actions */}

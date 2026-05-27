@@ -86,26 +86,44 @@ function renderElement(
       if (el.points.length === 0) return;
       ctx.save();
       ctx.globalAlpha = el.opacity;
-      ctx.beginPath();
       ctx.strokeStyle = el.eraser ? paperColor : el.color;
-      ctx.lineWidth = el.strokeWidth;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       const pts = el.points;
-      ctx.moveTo(pts[0]!.x, pts[0]!.y);
-      if (pts.length === 1) {
-        ctx.lineTo(pts[0]!.x + 0.1, pts[0]!.y);
-      } else if (pts.length === 2) {
-        ctx.lineTo(pts[1]!.x, pts[1]!.y);
-      } else {
-        for (let i = 1; i < pts.length - 1; i++) {
-          const mx = (pts[i]!.x + pts[i + 1]!.x) / 2;
-          const my = (pts[i]!.y + pts[i + 1]!.y) / 2;
-          ctx.quadraticCurveTo(pts[i]!.x, pts[i]!.y, mx, my);
+      const pr = el.pressures;
+      if (pr && pr.length === pts.length && pts.length > 1) {
+        for (let i = 0; i < pts.length - 1; i++) {
+          const p = Math.max(0.1, (pr[i]! + pr[i + 1]!) / 2);
+          ctx.lineWidth = el.strokeWidth * p;
+          ctx.beginPath();
+          ctx.moveTo(pts[i]!.x, pts[i]!.y);
+          if (i < pts.length - 2) {
+            const mx = (pts[i + 1]!.x + pts[i + 2]!.x) / 2;
+            const my = (pts[i + 1]!.y + pts[i + 2]!.y) / 2;
+            ctx.quadraticCurveTo(pts[i + 1]!.x, pts[i + 1]!.y, mx, my);
+          } else {
+            ctx.lineTo(pts[i + 1]!.x, pts[i + 1]!.y);
+          }
+          ctx.stroke();
         }
-        ctx.lineTo(pts[pts.length - 1]!.x, pts[pts.length - 1]!.y);
+      } else {
+        ctx.lineWidth = el.strokeWidth;
+        ctx.beginPath();
+        ctx.moveTo(pts[0]!.x, pts[0]!.y);
+        if (pts.length === 1) {
+          ctx.lineTo(pts[0]!.x + 0.1, pts[0]!.y);
+        } else if (pts.length === 2) {
+          ctx.lineTo(pts[1]!.x, pts[1]!.y);
+        } else {
+          for (let i = 1; i < pts.length - 1; i++) {
+            const mx = (pts[i]!.x + pts[i + 1]!.x) / 2;
+            const my = (pts[i]!.y + pts[i + 1]!.y) / 2;
+            ctx.quadraticCurveTo(pts[i]!.x, pts[i]!.y, mx, my);
+          }
+          ctx.lineTo(pts[pts.length - 1]!.x, pts[pts.length - 1]!.y);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
       ctx.restore();
       return;
     }
@@ -531,6 +549,91 @@ export function renderScene(
   if (elements.length > 0 && accentColor) {
     renderMinimap(ctx, elements, camera, viewW, viewH, dpr, paperColor, accentColor);
   }
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function elementToSvg(el: SceneElement): string {
+  switch (el.type) {
+    case "path": {
+      if (el.points.length < 2) return "";
+      const pts = el.points;
+      let d = `M ${pts[0]!.x} ${pts[0]!.y}`;
+      if (pts.length === 2) {
+        d += ` L ${pts[1]!.x} ${pts[1]!.y}`;
+      } else {
+        for (let i = 1; i < pts.length - 1; i++) {
+          const mx = (pts[i]!.x + pts[i + 1]!.x) / 2;
+          const my = (pts[i]!.y + pts[i + 1]!.y) / 2;
+          d += ` Q ${pts[i]!.x} ${pts[i]!.y} ${mx} ${my}`;
+        }
+        d += ` L ${pts[pts.length - 1]!.x} ${pts[pts.length - 1]!.y}`;
+      }
+      return `<path d="${d}" fill="none" stroke="${el.color}" stroke-width="${el.strokeWidth}" stroke-linecap="round" stroke-linejoin="round" opacity="${el.opacity}"/>`;
+    }
+    case "line":
+      return `<line x1="${el.start.x}" y1="${el.start.y}" x2="${el.end.x}" y2="${el.end.y}" stroke="${el.color}" stroke-width="${el.strokeWidth}" stroke-linecap="round" opacity="${el.opacity}"/>`;
+    case "arrow": {
+      const headLen = Math.max(el.strokeWidth * 3, 12);
+      const angle = Math.atan2(el.end.y - el.start.y, el.end.x - el.start.x);
+      const ax1 = el.end.x - headLen * Math.cos(angle - Math.PI / 6);
+      const ay1 = el.end.y - headLen * Math.sin(angle - Math.PI / 6);
+      const ax2 = el.end.x - headLen * Math.cos(angle + Math.PI / 6);
+      const ay2 = el.end.y - headLen * Math.sin(angle + Math.PI / 6);
+      return `<g opacity="${el.opacity}"><line x1="${el.start.x}" y1="${el.start.y}" x2="${el.end.x}" y2="${el.end.y}" stroke="${el.color}" stroke-width="${el.strokeWidth}" stroke-linecap="round"/><line x1="${el.end.x}" y1="${el.end.y}" x2="${ax1}" y2="${ay1}" stroke="${el.color}" stroke-width="${el.strokeWidth}" stroke-linecap="round"/><line x1="${el.end.x}" y1="${el.end.y}" x2="${ax2}" y2="${ay2}" stroke="${el.color}" stroke-width="${el.strokeWidth}" stroke-linecap="round"/></g>`;
+    }
+    case "rect": {
+      const x = Math.min(el.start.x, el.end.x);
+      const y = Math.min(el.start.y, el.end.y);
+      const w = Math.abs(el.end.x - el.start.x);
+      const h = Math.abs(el.end.y - el.start.y);
+      return el.filled
+        ? `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${el.color}" opacity="${el.opacity}"/>`
+        : `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="${el.color}" stroke-width="${el.strokeWidth}" opacity="${el.opacity}"/>`;
+    }
+    case "ellipse": {
+      const cx = (el.start.x + el.end.x) / 2;
+      const cy = (el.start.y + el.end.y) / 2;
+      const rx = Math.abs(el.end.x - el.start.x) / 2;
+      const ry = Math.abs(el.end.y - el.start.y) / 2;
+      if (rx <= 0 || ry <= 0) return "";
+      return el.filled
+        ? `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="${el.color}" opacity="${el.opacity}"/>`
+        : `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="none" stroke="${el.color}" stroke-width="${el.strokeWidth}" opacity="${el.opacity}"/>`;
+    }
+    case "text": {
+      const weight = el.bold ? "bold" : "normal";
+      const style = el.italic ? "italic" : "normal";
+      const lines = el.text.split("\n");
+      const tspans = lines.map((line, i) =>
+        `<tspan x="${el.pos.x}" dy="${i === 0 ? 0 : el.fontSize * 1.3}">${escapeXml(line)}</tspan>`
+      ).join("");
+      return `<text x="${el.pos.x}" y="${el.pos.y}" fill="${el.color}" font-family="Manrope, system-ui, sans-serif" font-size="${el.fontSize}" font-weight="${weight}" font-style="${style}" dominant-baseline="hanging">${tspans}</text>`;
+    }
+    case "sticky": {
+      const r = 6;
+      let svg = `<rect x="${el.pos.x}" y="${el.pos.y}" width="${el.width}" height="${el.height}" rx="${r}" fill="${el.color}"/>`;
+      if (el.text) {
+        svg += `<text x="${el.pos.x + 12}" y="${el.pos.y + 12}" fill="#1a1a1a" font-family="Manrope, system-ui, sans-serif" font-size="14" dominant-baseline="hanging">${escapeXml(el.text)}</text>`;
+      }
+      return svg;
+    }
+    case "image":
+      return `<image x="${el.pos.x}" y="${el.pos.y}" width="${el.width || 100}" height="${el.height || 100}" href="${el.dataUrl}"/>`;
+  }
+}
+
+export function exportSvg(elements: SceneElement[], paperColor: string, padding = 40): string | null {
+  const bounds = getSceneBounds(elements);
+  if (!bounds) return null;
+  const w = bounds.width + padding * 2;
+  const h = bounds.height + padding * 2;
+  const ox = bounds.x - padding;
+  const oy = bounds.y - padding;
+  const children = elements.map(elementToSvg).filter(Boolean).join("\n  ");
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${ox} ${oy} ${w} ${h}" width="${w}" height="${h}">\n  <rect x="${ox}" y="${oy}" width="${w}" height="${h}" fill="${paperColor}"/>\n  ${children}\n</svg>`;
 }
 
 /** Render the full board to an offscreen canvas and return it as a data URL. */

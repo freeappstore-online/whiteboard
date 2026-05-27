@@ -13,6 +13,7 @@ export interface PathElement {
   id: string;
   type: "path";
   points: Point[];
+  pressures?: number[];
   color: string;
   strokeWidth: number;
   opacity: number;
