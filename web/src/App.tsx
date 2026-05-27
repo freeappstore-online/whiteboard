@@ -86,20 +86,24 @@ function snapPoint(p: Point, gridSize = 20): Point {
   return { x: Math.round(p.x / gridSize) * gridSize, y: Math.round(p.y / gridSize) * gridSize };
 }
 
-function constrainAngle(start: Point, end: Point): Point {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const dist = Math.hypot(dx, dy);
-  const angle = Math.atan2(dy, dx);
-  const snapped = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
-  return { x: start.x + dist * Math.cos(snapped), y: start.y + dist * Math.sin(snapped) };
-}
-
 function normalizeRect(p1: Point, p2: Point): Rect {
   const x = Math.min(p1.x, p2.x);
   const y = Math.min(p1.y, p2.y);
   return { x, y, width: Math.abs(p2.x - p1.x), height: Math.abs(p2.y - p1.y) };
 }
+
+function translateElement(el: SceneElement, dx: number, dy: number): SceneElement {
+  if (dx === 0 && dy === 0) return el;
+  if (el.type === "sticky" || el.type === "image" || el.type === "text") {
+    return { ...el, pos: { x: el.pos.x + dx, y: el.pos.y + dy } };
+  }
+  if (el.type === "path") {
+    return { ...el, points: el.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+  }
+  return { ...el, start: { x: el.start.x + dx, y: el.start.y + dy }, end: { x: el.end.x + dx, y: el.end.y + dy } };
+}
+
+type AlignKind = "left" | "centerX" | "right" | "top" | "centerY" | "bottom";
 
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -166,6 +170,7 @@ export function App() {
   const resizeCornerRef = useRef<string | null>(null);
   const resizeOrigBoundsRef = useRef<Rect | null>(null);
   const resizeOrigElementRef = useRef<SceneElement | null>(null);
+  const editingTextIdRef = useRef<string | null>(null);
 
   // Keep refs in sync for render function
   const elementsRef = useRef(elements);
@@ -216,9 +221,13 @@ export function App() {
     const paperColor = getCssVar("--color-paper");
     const accentColor = getCssVar("--color-accent");
     const dpr = window.devicePixelRatio || 1;
+    const hiddenId = editingTextIdRef.current;
+    const elsToRender = hiddenId
+      ? elementsRef.current.filter((el) => el.id !== hiddenId)
+      : elementsRef.current;
     renderScene(
       ctx, canvas.width, canvas.height,
-      elementsRef.current, cameraRef.current,
+      elsToRender, cameraRef.current,
       paperColor, showGridRef.current, dpr,
       imageCacheRef.current,
       inProgressRef.current,
@@ -426,13 +435,7 @@ export function App() {
         if (!ids.has(el.id)) continue;
         const newId = crypto.randomUUID();
         newIds.add(newId);
-        if (el.type === "sticky" || el.type === "image" || el.type === "text") {
-          clones.push({ ...el, id: newId, pos: { x: el.pos.x + offset, y: el.pos.y + offset } });
-        } else if (el.type === "path") {
-          clones.push({ ...el, id: newId, points: el.points.map((p) => ({ x: p.x + offset, y: p.y + offset })) });
-        } else {
-          clones.push({ ...el, id: newId, start: { x: el.start.x + offset, y: el.start.y + offset }, end: { x: el.end.x + offset, y: el.end.y + offset } });
-        }
+        clones.push({ ...translateElement(el, offset, offset), id: newId });
       }
       return [...prev, ...clones];
     });
@@ -482,6 +485,63 @@ export function App() {
     clipboardRef.current = elementsRef.current.filter((el) => ids.has(el.id));
   }, []);
 
+  const alignSelected = useCallback((kind: AlignKind) => {
+    const ids = selectedIdsRef.current;
+    if (ids.size < 2) return;
+    const items = elementsRef.current.filter((el) => ids.has(el.id)).map((el) => ({ el, b: getElementBounds(el) }));
+    if (items.length < 2) return;
+    const minX = Math.min(...items.map((i) => i.b.x));
+    const maxX = Math.max(...items.map((i) => i.b.x + i.b.width));
+    const minY = Math.min(...items.map((i) => i.b.y));
+    const maxY = Math.max(...items.map((i) => i.b.y + i.b.height));
+    pushUndo();
+    setElements((prev) =>
+      prev.map((el) => {
+        if (!ids.has(el.id)) return el;
+        const b = getElementBounds(el);
+        switch (kind) {
+          case "left":    return translateElement(el, minX - b.x, 0);
+          case "right":   return translateElement(el, maxX - (b.x + b.width), 0);
+          case "centerX": return translateElement(el, (minX + maxX) / 2 - (b.x + b.width / 2), 0);
+          case "top":     return translateElement(el, 0, minY - b.y);
+          case "bottom":  return translateElement(el, 0, maxY - (b.y + b.height));
+          case "centerY": return translateElement(el, 0, (minY + maxY) / 2 - (b.y + b.height / 2));
+        }
+      }),
+    );
+  }, [pushUndo]);
+
+  const distributeSelected = useCallback((axis: "x" | "y") => {
+    const ids = selectedIdsRef.current;
+    if (ids.size < 3) return;
+    const items = elementsRef.current
+      .filter((el) => ids.has(el.id))
+      .map((el) => {
+        const b = getElementBounds(el);
+        return { el, b, center: axis === "x" ? b.x + b.width / 2 : b.y + b.height / 2 };
+      })
+      .sort((a, c) => a.center - c.center);
+    if (items.length < 3) return;
+    const first = items[0]!.center;
+    const last = items[items.length - 1]!.center;
+    const step = (last - first) / (items.length - 1);
+    const deltas = new Map<string, number>();
+    for (let i = 1; i < items.length - 1; i++) {
+      const item = items[i]!;
+      const target = first + step * i;
+      deltas.set(item.el.id, target - item.center);
+    }
+    if (deltas.size === 0) return;
+    pushUndo();
+    setElements((prev) =>
+      prev.map((el) => {
+        const d = deltas.get(el.id);
+        if (d === undefined) return el;
+        return axis === "x" ? translateElement(el, d, 0) : translateElement(el, 0, d);
+      }),
+    );
+  }, [pushUndo]);
+
   const pasteClipboard = useCallback(() => {
     const items = clipboardRef.current;
     if (items.length === 0) return;
@@ -491,13 +551,7 @@ export function App() {
     const clones: SceneElement[] = items.map((el) => {
       const newId = crypto.randomUUID();
       newIds.add(newId);
-      if (el.type === "sticky" || el.type === "image" || el.type === "text") {
-        return { ...el, id: newId, pos: { x: el.pos.x + offset, y: el.pos.y + offset } };
-      }
-      if (el.type === "path") {
-        return { ...el, id: newId, points: el.points.map((p) => ({ x: p.x + offset, y: p.y + offset })) };
-      }
-      return { ...el, id: newId, start: { x: el.start.x + offset, y: el.start.y + offset }, end: { x: el.end.x + offset, y: el.end.y + offset } };
+      return { ...translateElement(el, offset, offset), id: newId };
     });
     setElements((prev) => [...prev, ...clones]);
     setSelectedIds(newIds);
@@ -537,24 +591,48 @@ export function App() {
     URL.revokeObjectURL(link.href);
   }, [activeId, drawings]);
 
-  // -- Text commit --
+  // -- Text commit / cancel --
   const commitText = useCallback(() => {
-    if (!textEditing || !textValue.trim()) {
-      setTextEditing(null);
-      setTextValue("");
-      return;
+    if (!textEditing) return;
+    const trimmed = textValue.trim();
+    const editingId = editingTextIdRef.current;
+
+    if (editingId) {
+      pushUndo();
+      if (!trimmed) {
+        setElements((prev) => prev.filter((el) => el.id !== editingId));
+      } else {
+        setElements((prev) =>
+          prev.map((el) =>
+            el.id === editingId && el.type === "text"
+              ? { ...el, text: trimmed, color: colorRef.current, fontSize, bold, italic, pos: textEditing }
+              : el,
+          ),
+        );
+      }
+    } else if (trimmed) {
+      pushUndo();
+      const el: SceneElement = {
+        id: crypto.randomUUID(), type: "text",
+        pos: textEditing, text: trimmed,
+        color: colorRef.current, fontSize,
+        bold, italic,
+      };
+      setElements((prev) => [...prev, el]);
     }
-    pushUndo();
-    const el: SceneElement = {
-      id: crypto.randomUUID(), type: "text",
-      pos: textEditing, text: textValue.trim(),
-      color: colorRef.current, fontSize,
-      bold, italic,
-    };
-    setElements((prev) => [...prev, el]);
+
+    editingTextIdRef.current = null;
     setTextEditing(null);
     setTextValue("");
-  }, [textEditing, textValue, fontSize, bold, italic, pushUndo]);
+    renderToCanvas();
+  }, [textEditing, textValue, fontSize, bold, italic, pushUndo, renderToCanvas]);
+
+  const cancelText = useCallback(() => {
+    editingTextIdRef.current = null;
+    setTextEditing(null);
+    setTextValue("");
+    renderToCanvas();
+  }, [renderToCanvas]);
 
   // -- Sticky commit --
   const commitSticky = useCallback(() => {
@@ -905,19 +983,7 @@ export function App() {
       if (dx === 0 && dy === 0) return;
 
       setElements((prev) =>
-        prev.map((el) => {
-          if (!selectedIdsRef.current.has(el.id)) return el;
-          if (el.type === "sticky" || el.type === "image" || el.type === "text") {
-            return { ...el, pos: { x: el.pos.x + dx, y: el.pos.y + dy } };
-          }
-          if (el.type === "path") {
-            return { ...el, points: el.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
-          }
-          if ("start" in el) {
-            return { ...el, start: { x: el.start.x + dx, y: el.start.y + dy }, end: { x: el.end.x + dx, y: el.end.y + dy } };
-          }
-          return el;
-        }),
+        prev.map((el) => (selectedIdsRef.current.has(el.id) ? translateElement(el, dx, dy) : el)),
       );
       return;
     }
@@ -1084,6 +1150,11 @@ export function App() {
         persistCurrentDrawing();
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === "a") {
+        e.preventDefault();
+        selectAll();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "c") {
         e.preventDefault();
         copySelected();
@@ -1154,7 +1225,7 @@ export function App() {
     window.addEventListener("keydown", handler);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", handler); window.removeEventListener("keyup", up); };
-  }, [handleUndo, handleRedo, pushUndo, duplicateSelected, zoomToFit, bringForward, sendBackward, deleteSelected, persistCurrentDrawing, copySelected, pasteClipboard, textEditing, stickyEditing, editingId]);
+  }, [handleUndo, handleRedo, pushUndo, duplicateSelected, zoomToFit, bringForward, sendBackward, deleteSelected, persistCurrentDrawing, copySelected, pasteClipboard, selectAll, textEditing, stickyEditing, editingId]);
 
   // -- Image paste --
   useEffect(() => {
@@ -1213,7 +1284,7 @@ export function App() {
     return () => window.removeEventListener("paste", handler);
   }, [pushUndo]);
 
-  // -- Double-click to edit sticky --
+  // -- Double-click to edit sticky or text --
   const onDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (toolRef.current !== "select") return;
     const screenPos = getCanvasPos(e);
@@ -1222,8 +1293,18 @@ export function App() {
     if (hit?.type === "sticky") {
       setStickyEditing({ id: hit.id, pos: hit.pos, width: hit.width, height: hit.height });
       setStickyText(hit.text);
+    } else if (hit?.type === "text") {
+      editingTextIdRef.current = hit.id;
+      setSelectedIds(new Set());
+      setTextEditing(hit.pos);
+      setTextValue(hit.text);
+      setFontSize(hit.fontSize);
+      setBold(hit.bold);
+      setItalic(hit.italic);
+      setColor(hit.color);
+      renderToCanvas();
     }
-  }, [getCanvasPos]);
+  }, [getCanvasPos, renderToCanvas]);
 
   // Focus inputs when editing
   useEffect(() => { if (textEditing && textInputRef.current) textInputRef.current.focus(); }, [textEditing]);
@@ -1425,6 +1506,28 @@ export function App() {
             <button onClick={sendBackward} style={btnStyle} title="Send Backward ([)">Back</button>
             <button onClick={deleteSelected} style={btnStyle} title="Delete (Backspace)">Del</button>
           </div>
+          {selectedIds.size >= 2 && (
+            <>
+              <div style={{ ...labelStyle, marginTop: "0.5rem" }}>Align</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button onClick={() => alignSelected("left")}    style={btnStyle} title="Align Left">⟸</button>
+                <button onClick={() => alignSelected("centerX")} style={btnStyle} title="Align Center">⇔</button>
+                <button onClick={() => alignSelected("right")}   style={btnStyle} title="Align Right">⟹</button>
+                <button onClick={() => alignSelected("top")}     style={btnStyle} title="Align Top">⤒</button>
+                <button onClick={() => alignSelected("centerY")} style={btnStyle} title="Align Middle">⇕</button>
+                <button onClick={() => alignSelected("bottom")}  style={btnStyle} title="Align Bottom">⤓</button>
+              </div>
+            </>
+          )}
+          {selectedIds.size >= 3 && (
+            <>
+              <div style={{ ...labelStyle, marginTop: "0.5rem" }}>Distribute</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button onClick={() => distributeSelected("x")} style={btnStyle} title="Distribute Horizontally">↔ H</button>
+                <button onClick={() => distributeSelected("y")} style={btnStyle} title="Distribute Vertically">↕ V</button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -1575,7 +1678,7 @@ export function App() {
               onChange={(e) => setTextValue(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); }
-                if (e.key === "Escape") { setTextEditing(null); setTextValue(""); }
+                if (e.key === "Escape") { e.preventDefault(); cancelText(); }
               }}
               onBlur={commitText}
               placeholder="Type here..."
