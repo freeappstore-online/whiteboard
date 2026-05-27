@@ -14,13 +14,21 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light) {
     --color-paper: #0f0f0e;
     --color-ink: #f2f0ed;
     --color-muted: #7a7770;
     --color-line: #2a2825;
     --color-panel: #1a1918;
   }
+}
+
+:root.dark {
+  --color-paper: #0f0f0e;
+  --color-ink: #f2f0ed;
+  --color-muted: #7a7770;
+  --color-line: #2a2825;
+  --color-panel: #1a1918;
 }
 
 * { box-sizing: border-box; }
