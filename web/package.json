@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@freeappstore/sdk": "^0.16.39",
     "react": "^19",
     "react-dom": "^19"
   },

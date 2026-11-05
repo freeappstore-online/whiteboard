@@ -2,22 +2,32 @@
   "name": "Whiteboard",
   "short_name": "Board",
   "start_url": "/",
+  "id": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#1a1917",
   "theme_color": "#1a1917",
   "description": "Free Whiteboard app — part of FreeAppStore",
+  "orientation": "any",
+  "min_viewport_width": 360,
   "icons": [
     {
-      "src": "/icons/icon-192.png",
+      "src": "/pwa-192x192.png",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
     },
     {
-      "src": "/icons/icon-512.png",
+      "src": "/pwa-512x512.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/maskable-icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
-  ],
-  "orientation": "any",
-  "min_viewport_width": 360
+  ]
 }
