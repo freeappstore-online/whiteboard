@@ -313,6 +313,13 @@ export function App() {
     return () => clearInterval(interval);
   }, [activeId, persistCurrentDrawing]);
 
+  // Save shortly after any change to the elements, not just on the 3s interval.
+  useEffect(() => {
+    if (!activeId) return;
+    const t = setTimeout(persistCurrentDrawing, 300);
+    return () => clearTimeout(t);
+  }, [elements]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // -- Undo / Redo --
   const pushUndo = useCallback(() => {
     setUndoStack((prev) => {
